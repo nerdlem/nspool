@@ -1,0 +1,56 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with 'go test -c'
+*.test
+
+# Output of the go coverage tool
+*.out
+*.cover
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Local development files
+*.lst
+.env
+.env.local
+*.log
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Dependency directories
+vendor/
+
+# Binary output directories
+bin/
+dist/
+
+# Debug files
+debug/
+
+# Test cache
+testdata/
+
+# Local development config files
+*.local.yml
+*.local.yaml
+*.local.json
+*.local.toml
