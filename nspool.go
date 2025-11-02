@@ -530,6 +530,34 @@ func (p *Pool) SetMinResolvers(min int) {
 	p.minResolvers = min
 }
 
+// MaxQueryRetries returns the maximum number of times a query will be retried with
+// different resolvers before giving up. This affects both health checks and regular
+// DNS queries. A value of 0 means only one attempt will be made (no retries).
+func (p *Pool) MaxQueryRetries() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxQueryRetries
+}
+
+// SetMaxQueryRetries sets the maximum number of times a query will be retried with
+// different resolvers before giving up. This affects both health checks and regular
+// DNS queries. A value of 0 means only one attempt will be made (no retries).
+// Negative values are treated as 0.
+func (p *Pool) SetMaxQueryRetries(retries int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if retries < 0 {
+		retries = 0
+	}
+	p.maxQueryRetries = retries
+}
+
 // AvailableResolvers returns a copy of the list of currently available resolvers.
 // The returned slice can be safely modified without affecting the pool's internal state.
 // Returns nil if the pool is nil.

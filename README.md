@@ -92,9 +92,20 @@ nsp.AutoRefresh(viper.GetDuration("dns.auto_refresh"))
 
 ## Retrying failed queries
 
-The `nsp.MaxQueryRetries(n int)` and `nsp.QueryTimeout(t time.Duration)` are used to handle DNS query timeouts and retries when using `nsp.Exchange()` and `nsp.ExchangeContext()` to perform queries against random servers in the pool.
+The `nsp.SetMaxQueryRetries(n int)` method configures how many times a failed query will be retried with different resolvers before giving up. You can use `nsp.MaxQueryRetries()` to get the current retry limit. This affects both health checks and regular DNS queries when using `nsp.Exchange()` and `nsp.ExchangeContext()`.
 
-Queries failing due to timeouts or networking issues are retried automatically—up to `MaxQueryRetries()` times—on behalf of the caller.
+For example:
+```go
+// Set maximum retries to 5 (up to 6 total attempts)
+nsp.SetMaxQueryRetries(5)
+
+// Get current retry limit
+retries := nsp.MaxQueryRetries()
+```
+
+A value of 0 means only one attempt will be made (no retries). Negative values are treated as 0. The default value is 3 retries.
+
+Queries failing due to timeouts or networking issues are retried automatically on different resolvers—up to the configured retry limit—on behalf of the caller. Each retry uses a different randomly selected resolver from the available pool.
 
 ## Logging with logrus
 
