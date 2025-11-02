@@ -241,8 +241,7 @@ func (p *Pool) Debug() bool {
 	return p.debug
 }
 
-// SetDebug sets the debug flag. If a logger is present, adjust its level:
-// DebugLevel when enabled, InfoLevel when disabled.
+// SetDebug sets the debug flag for internal module debug logging.
 func (p *Pool) SetDebug(enabled bool) {
 	if p == nil {
 		return

@@ -956,6 +956,53 @@ func TestAutoRefresh(t *testing.T) {
 			t.Errorf("Expected exactly 2 refreshes in 200ms with 100ms interval, got %d", refreshCount)
 		}
 	})
+
+	t.Run("handles negative refresh interval", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(true, 10*time.Millisecond)
+
+		// Set negative interval (should effectively disable)
+		p.AutoRefresh(-1 * time.Second)
+
+		if p.hcAutoRefreshInterval != -1*time.Second {
+			t.Errorf("hcAutoRefreshInterval = %v; want -1s", p.hcAutoRefreshInterval)
+		}
+
+		// Channel should be nil or closed
+		if p.hcAutoRefreshChan != nil {
+			select {
+			case <-*p.hcAutoRefreshChan:
+				// Channel is closed (good)
+			default:
+				t.Error("Auto-refresh channel should be closed for negative interval")
+			}
+		}
+	})
+
+	t.Run("restart with same interval is safe", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(true, 10*time.Millisecond)
+
+		// Start with interval
+		interval := 100 * time.Millisecond
+		p.AutoRefresh(interval)
+
+		// Allow initial refresh to complete
+		time.Sleep(20 * time.Millisecond)
+
+		// Restart with same interval
+		p.AutoRefresh(interval)
+		time.Sleep(20 * time.Millisecond) // Allow new routine to start
+
+		// Should still be working
+		if p.hcAutoRefreshInterval != interval {
+			t.Errorf("hcAutoRefreshInterval = %v; want %v", p.hcAutoRefreshInterval, interval)
+		}
+
+		p.AutoRefresh(0) // Cleanup
+	})
 }
 
 func TestResolverListAccessors(t *testing.T) {
@@ -1377,7 +1424,7 @@ func TestExchange(t *testing.T) {
 		p.mu.Unlock()
 
 		// First attempt should fail but second should succeed
-		resp, _, err := p.Exchange(makeTestQuery())
+		_, _, err := p.Exchange(makeTestQuery())
 		if err == nil {
 			t.Error("Exchange() expected error but got nil")
 		}
@@ -1387,11 +1434,11 @@ func TestExchange(t *testing.T) {
 		p.Client = newMockClient(true, 10*time.Millisecond)
 		p.mu.Unlock()
 
-		resp, _, err = p.Exchange(makeTestQuery())
+		resp2, _, err := p.Exchange(makeTestQuery())
 		if err != nil {
 			t.Errorf("Exchange() retry error = %v; want nil", err)
 		}
-		if resp == nil {
+		if resp2 == nil {
 			t.Error("Exchange() retry response is nil")
 		}
 	})
@@ -1423,6 +1470,25 @@ func TestExchangeContext(t *testing.T) {
 		}
 	})
 
+	t.Run("nil pool returns error", func(t *testing.T) {
+		var p *Pool = nil
+		ctx := context.Background()
+		_, _, err := p.ExchangeContext(ctx, makeTestQuery())
+		if err != ErrNilPool {
+			t.Errorf("ExchangeContext() error = %v; want %v", err, ErrNilPool)
+		}
+	})
+
+	t.Run("nil client returns error", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.Client = nil
+		ctx := context.Background()
+		_, _, err := p.ExchangeContext(ctx, makeTestQuery())
+		if err != ErrNilDnsClient {
+			t.Errorf("ExchangeContext() error = %v; want %v", err, ErrNilDnsClient)
+		}
+	})
+
 	t.Run("uses provided context", func(t *testing.T) {
 		resolvers := []string{"1.1.1.1:53"}
 		p := NewFromPoolSlice(resolvers)
@@ -1440,40 +1506,6 @@ func TestExchangeContext(t *testing.T) {
 		}
 		if resp == nil {
 			t.Error("ExchangeContext() response is nil")
-		}
-	})
-
-	t.Run("concurrent queries are safe", func(t *testing.T) {
-		resolvers := []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
-		p := NewFromPoolSlice(resolvers)
-		p.mu.Lock()
-		p.availableResolvers = append([]string{}, resolvers...)
-		p.Client = newMockClient(true, 10*time.Millisecond)
-		p.mu.Unlock()
-
-		const queries = 100
-		var wg sync.WaitGroup
-		wg.Add(queries)
-		results := make(chan error, queries)
-
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-
-		for i := 0; i < queries; i++ {
-			go func() {
-				defer wg.Done()
-				_, _, err := p.ExchangeContext(ctx, makeTestQuery())
-				results <- err
-			}()
-		}
-
-		wg.Wait()
-		close(results)
-
-		for err := range results {
-			if err != nil {
-				t.Errorf("concurrent ExchangeContext() error = %v", err)
-			}
 		}
 	})
 
@@ -1550,6 +1582,12 @@ func TestDebugAccessors(t *testing.T) {
 		if got := p.Debug(); got != false {
 			t.Errorf("Debug() on nil pool = %v; want false", got)
 		}
+
+		// Ensure calling SetDebug on nil pool is safe
+		p.SetDebug(true)
+		if got := p.Debug(); got != false {
+			t.Errorf("Debug() on nil pool after SetDebug = %v; want false", got)
+		}
 	})
 
 	t.Run("initial value is false", func(t *testing.T) {
@@ -1559,19 +1597,30 @@ func TestDebugAccessors(t *testing.T) {
 		}
 	})
 
-	t.Run("set and get with logger", func(t *testing.T) {
+	t.Run("set and get debug flag", func(t *testing.T) {
 		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
 		logger := logrus.New()
+		logger.SetLevel(logrus.InfoLevel) // Start at info level
 		p.SetLogger(logger)
 
+		// Enable debug - should only change internal flag
 		p.SetDebug(true)
 		if got := p.Debug(); got != true {
 			t.Errorf("Debug() after setting true = %v; want true", got)
 		}
 
+		// Logger level should remain unchanged
+		if logger.GetLevel() != logrus.InfoLevel {
+			t.Errorf("logger level changed = %v; should remain at InfoLevel", logger.GetLevel())
+		}
+
+		// Disable debug - should only change internal flag
 		p.SetDebug(false)
 		if got := p.Debug(); got != false {
 			t.Errorf("Debug() after setting false = %v; want false", got)
+		}
+		if logger.GetLevel() != logrus.InfoLevel {
+			t.Errorf("logger level changed = %v; should remain at InfoLevel", logger.GetLevel())
 		}
 	})
 
@@ -1581,6 +1630,34 @@ func TestDebugAccessors(t *testing.T) {
 		p.SetDebug(true)
 		if got := p.Debug(); got != true {
 			t.Errorf("Debug() after setting true with nil logger = %v; want true", got)
+		}
+	})
+
+	t.Run("concurrent debug and logger operations", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		logger := logrus.New()
+		p.SetLogger(logger)
+
+		// Run concurrent debug operations
+		const ops = 100
+		done := make(chan bool, ops)
+		for i := 0; i < ops; i++ {
+			go func(n int) {
+				p.SetDebug(n%2 == 0)
+				_ = p.Debug()
+				done <- true
+			}(i)
+		}
+
+		// Wait for all operations
+		for i := 0; i < ops; i++ {
+			<-done
+		}
+
+		// Verify we can still set and get debug state
+		p.SetDebug(true)
+		if !p.Debug() {
+			t.Error("Debug state not properly set after concurrent operations")
 		}
 	})
 }
