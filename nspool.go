@@ -504,6 +504,30 @@ func (p *Pool) SetHealthCheckQType(qtype uint16) {
 	p.hcQType = qtype
 }
 
+// HealthCheckWorkerCount returns the number of worker goroutines used for parallel health checks.
+// A value of 0 or negative will still be returned as-is, but during Refresh operations
+// these values will result in using a single worker. Defaults to 64.
+func (p *Pool) HealthCheckWorkerCount() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hcWpSize
+}
+
+// SetHealthCheckWorkerCount sets the number of worker goroutines used for parallel health checks.
+// Values of 0 or negative will result in using a single worker. The default is 64.
+// This setting affects the number of concurrent health checks performed during Refresh().
+func (p *Pool) SetHealthCheckWorkerCount(count int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hcWpSize = count
+}
+
 // MinResolvers returns the minimum number of resolvers that must be available for
 // the pool to be considered operational. A value of 0 means no minimum is required.
 func (p *Pool) MinResolvers() int {

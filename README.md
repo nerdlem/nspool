@@ -34,6 +34,16 @@ resolvers = [ "ns1.resolver.example:53", "ns2.resolver.example:53" ]
 
 ## DNS resolver health checks
 
+Health checks are performed in parallel using a configurable number of worker goroutines. You can control the concurrency using:
+
+```go
+// Get current worker pool size (default is 64)
+workers := nsp.HealthCheckWorkerSize()
+
+// Set to a different size (use 1 for serial processing)
+nsp.SetHealthCheckWorkerSize(32)
+```
+
 When the automatic timer triggers or the `Refresh()` method is invoked, the following actions will be taken:
 
 * If the pool was initialized from `viper`, the list of candidate resolvers will be pulled.
