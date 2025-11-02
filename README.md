@@ -1,5 +1,5 @@
-[![GoDoc](https://godoc.org/github.com/nerdlem/nspool?status.svg)](https://godoc.org/github.com/nerdlem/nspool)
-[![Go Report Card](https://goreportcard.com/badge/github.com/nerdlem/nspool)](https://goreportcard.com/report/github.com/nerdlem/nspool)
+[![GoDoc](https://godoc.org/github.com/nerdlem/nspool/v2?status.svg)](https://godoc.org/github.com/nerdlem/nspool/v2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nerdlem/nspool/v2)](https://goreportcard.com/report/github.com/nerdlem/nspool/v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # nspool — Work with healthy subset of a constellation of DNS (recursive, caching) resolvers
