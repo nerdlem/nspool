@@ -5,18 +5,26 @@ package nspool
 
 import (
 	"bufio"
+	"compress/bzip2"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/ulikunitz/xz"
 )
 
 // FileArray is a string slice that can be populated from a file or direct values in configuration.
 // It supports three use cases:
 //
 //  1. Single file reference:
-//     "@/path/to/file" -> [lines from file]
+//     "@/path/to/file[.gz|.bz2|.xz]" -> [lines from file]
 //     Each non-empty, non-comment line in the file becomes an element.
+//     The file can be optionally compressed with gzip (.gz), bzip2 (.bz2),
+//     or xz (.xz) compression - decompression happens automatically.
 //
 //  2. String slice:
 //     ["ns1:53", "ns2:53"] -> ["ns1:53", "ns2:53"]
@@ -106,20 +114,66 @@ func (f *FileArray) UnmarshalTOML(data interface{}) error {
 	return nil
 }
 
+// openCompressedFile opens a file and returns an appropriate reader based on the file extension.
+// It supports .gz (gzip), .bz2 (bzip2), and .xz compression formats.
+func openCompressedFile(path string) (io.ReadCloser, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".gz":
+		reader, err := gzip.NewReader(file)
+		if err != nil {
+			file.Close()
+			return nil, fmt.Errorf("gzip error: %v", err)
+		}
+		return reader, nil
+	case ".bz2":
+		// bzip2 doesn't need a Close method
+		return struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: bzip2.NewReader(file),
+			Closer: file,
+		}, nil
+	case ".xz":
+		reader, err := xz.NewReader(file)
+		if err != nil {
+			file.Close()
+			return nil, fmt.Errorf("xz error: %v", err)
+		}
+		return struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: reader,
+			Closer: file,
+		}, nil
+	default:
+		return file, nil
+	}
+}
+
 // NewFileArray creates a FileArray from a string or []string input.
 // If the input is a string starting with "@", it reads from the file.
+// The file can be optionally compressed with gzip (.gz), bzip2 (.bz2),
+// or xz (.xz) compression - decompression happens automatically.
 func NewFileArray(input interface{}) (FileArray, error) {
 	switch v := input.(type) {
 	case string:
 		var fa FileArray
 		if strings.HasPrefix(v, "@") {
-			file, err := os.Open(strings.TrimPrefix(v, "@"))
+			path := strings.TrimPrefix(v, "@")
+			reader, err := openCompressedFile(path)
 			if err != nil {
 				return nil, err
 			}
-			defer file.Close()
+			defer reader.Close()
 
-			scanner := bufio.NewScanner(file)
+			scanner := bufio.NewScanner(reader)
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line != "" && !strings.HasPrefix(line, "#") {

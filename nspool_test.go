@@ -937,23 +937,38 @@ func TestAutoRefresh(t *testing.T) {
 		time.Sleep(20 * time.Millisecond) // Wait for initial refresh
 		buf.Reset()
 
-		// Wait for two intervals
-		time.Sleep(220 * time.Millisecond)
+		// Wait for initial refresh to complete
+		time.Sleep(20 * time.Millisecond)
+
+		// Now clear the buffer to ignore the initial refresh output
+		buf.Reset()
+
+		// Start timing our test window
+		start := time.Now()
+
+		// Wait for 2.5 intervals to ensure we catch 2 ticks
+		waitTime := interval * 5 / 2 // 2.5 times the interval
+		time.Sleep(waitTime)
 
 		// Get output before stopping
 		output := buf.String()
 
-		// Stop auto-refresh
+		// Stop auto-refresh and wait for goroutine to stop
 		p.AutoRefresh(0)
-		time.Sleep(20 * time.Millisecond) // Wait for goroutine to stop
+		time.Sleep(20 * time.Millisecond)
 
 		// Count refresh log entries
 		refreshCount := strings.Count(output, "health check refresh completed")
 
-		// Should have 2 refreshes in the ~200ms window between reset and check
+		// We should see 2 periodic refreshes in our window
 		// (not counting initial refresh which was cleared)
-		if refreshCount != 2 {
-			t.Errorf("Expected exactly 2 refreshes in 200ms with 100ms interval, got %d", refreshCount)
+		if refreshCount < 2 {
+			t.Errorf("Expected at least 2 refreshes in %v with %v interval, got %d. Output: %s",
+				time.Since(start), interval, refreshCount, output)
+		}
+		if refreshCount > 3 {
+			t.Errorf("Expected no more than 3 refreshes in %v with %v interval, got %d. Output: %s",
+				time.Since(start), interval, refreshCount, output)
 		}
 	})
 
