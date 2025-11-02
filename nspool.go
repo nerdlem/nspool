@@ -51,6 +51,9 @@ var (
 	// ErrInsufficientResolvers is returned when there are not enough available resolvers
 	// to satisfy the minimum resolver requirement.
 	ErrInsufficientResolvers = fmt.Errorf("insufficient available resolvers")
+	// ErrNilHealthCheck is returned when Refresh() is called and the health check
+	// function is nil.
+	ErrNilHealthCheck = fmt.Errorf("nil health check function")
 )
 
 // HealthLabelGenerator is the signature for a function that generates the label
@@ -82,6 +85,7 @@ type Pool struct {
 	hcAutoRefreshInterval time.Duration
 	hcDomainSuffix        string
 	hcNameGenerator       HealthLabelGenerator
+	hcHealthCheck         HealthCheckFunction
 	hcResolverTimeout     time.Duration
 	hcQType               uint16
 	hcWpSize              int
@@ -149,6 +153,7 @@ func NewFromPoolSlice(res []string) *Pool {
 		Client:                new(dns.Client),
 		hcAutoRefreshInterval: 0 * time.Second,
 		hcNameGenerator:       DefaultHealthLabelGenerator,
+		hcHealthCheck:         DefaultHealthCheckFunction,
 		hcQType:               dns.TypeA,
 		hcResolverTimeout:     10 * time.Second,
 		hcWpSize:              64,
@@ -178,6 +183,7 @@ func NewFromViper(tag string) *Pool {
 		Client:                new(dns.Client),
 		hcAutoRefreshInterval: 0 * time.Second,
 		hcNameGenerator:       DefaultHealthLabelGenerator,
+		hcHealthCheck:         DefaultHealthCheckFunction,
 		hcQType:               dns.TypeA,
 		hcResolverTimeout:     10 * time.Second,
 		hcWpSize:              64,
@@ -268,6 +274,33 @@ func (p *Pool) Logger() *logrus.Logger {
 	return p.logger
 }
 
+// SetHealthCheckFunction sets the function that will be used to evaluate resolver
+// health during refresh operations. If nil is provided, the default health check
+// function will be used.
+func (p *Pool) SetHealthCheckFunction(fn HealthCheckFunction) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if fn == nil {
+		p.hcHealthCheck = DefaultHealthCheckFunction
+	} else {
+		p.hcHealthCheck = fn
+	}
+}
+
+// HealthCheckFunction returns the current function used to evaluate resolver health.
+// Returns nil if the pool is nil.
+func (p *Pool) HealthCheckFunction() HealthCheckFunction {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hcHealthCheck
+}
+
 // Refresh implements health checking of the candidate resolvers. It will iterate
 // over each candidate through a workerpool issuing queries in parallel fashion.
 // Candidate resolvers that pass the test will be added to the availableResolvers
@@ -290,6 +323,10 @@ func (p *Pool) Refresh() error {
 
 	if p.Client == nil {
 		return ErrNilDnsClient
+	}
+
+	if p.hcHealthCheck == nil {
+		return ErrNilHealthCheck
 	}
 
 	// If pool was configured via viper, update resolvers from viper
@@ -359,7 +396,7 @@ func (p *Pool) Refresh() error {
 				elapsed := time.Since(start)
 				lastErr = err
 				if err == nil && ans != nil {
-					if DefaultHealthCheckFunction(*ans, elapsed, p) {
+					if p.hcHealthCheck(*ans, elapsed, p) {
 						healthy = true
 						break
 					}
@@ -670,9 +707,17 @@ func (p *Pool) AutoRefresh(t time.Duration) {
 	stop := make(chan bool)
 	p.hcAutoRefreshChan = &stop
 
+	// Ensure positive interval for ticker
+	if p.hcAutoRefreshInterval <= 0 {
+		return
+	}
+
+	// Make a local copy of the interval while holding the lock
+	interval := p.hcAutoRefreshInterval
+
 	// Launch auto-refresh goroutine with validated interval
 	go func() {
-		ticker := time.NewTicker(p.hcAutoRefreshInterval)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		// Perform initial refresh immediately

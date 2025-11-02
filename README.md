@@ -144,7 +144,7 @@ func myHealthCheck(resp *dns.Msg, t time.Duration, p *nspool.Pool) bool {
 }
   ⋮
 // Tell the pool to use your custom health check function
-nsp.HealthCheckFunction(myHealthCheck)
+nsp.SetHealthCheckFunction(myHealthCheck)
 ```
 
 # Performing DNS queries

@@ -167,35 +167,80 @@ func TestNewFromPoolSlice(t *testing.T) {
 }
 
 func TestNewFromViper(t *testing.T) {
-	tag := "test.resolvers.tag"
-	orig := []string{"9.9.9.9:53", "149.112.112.112:53"}
-	viper.Set(tag, orig)
+	t.Run("successful initialization", func(t *testing.T) {
+		tag := "test.resolvers.tag"
+		orig := []string{"9.9.9.9:53", "149.112.112.112:53"}
+		viper.Set(tag, orig)
 
-	p := NewFromViper(tag)
-	if p == nil {
-		t.Fatal("NewFromViper returned nil")
-	}
+		p := NewFromViper(tag)
+		if p == nil {
+			t.Fatal("NewFromViper returned nil")
+		}
 
-	if p.viperResolversTag != tag {
-		t.Fatalf("viperResolversTag = %q; want %q", p.viperResolversTag, tag)
-	}
+		if p.viperResolversTag != tag {
+			t.Fatalf("viperResolversTag = %q; want %q", p.viperResolversTag, tag)
+		}
 
-	got := p.resolvers.StringSlice()
-	if !reflect.DeepEqual(got, orig) {
-		t.Fatalf("resolvers = %v; want %v", got, orig)
-	}
+		got := p.resolvers.StringSlice()
+		if !reflect.DeepEqual(got, orig) {
+			t.Fatalf("resolvers = %v; want %v", got, orig)
+		}
 
-	if p.Client == nil {
-		t.Fatal("Client should be non-nil")
-	}
+		if p.Client == nil {
+			t.Fatal("Client should be non-nil")
+		}
 
-	// Spot check same defaults as other constructor
-	if p.minResolvers != 1 {
-		t.Fatalf("minResolvers = %d; want 1", p.minResolvers)
-	}
-	if p.queryTimeout != 10*time.Second {
-		t.Fatalf("queryTimeout = %v; want 10s", p.queryTimeout)
-	}
+		// Spot check same defaults as other constructor
+		if p.minResolvers != 1 {
+			t.Fatalf("minResolvers = %d; want 1", p.minResolvers)
+		}
+		if p.queryTimeout != 10*time.Second {
+			t.Fatalf("queryTimeout = %v; want 10s", p.queryTimeout)
+		}
+	})
+
+	t.Run("handles viper unmarshal error", func(t *testing.T) {
+		tag := "test.invalid.tag"
+		// Clear any existing value and set an invalid type
+		viper.Set(tag, map[string]interface{}{"invalid": true})
+
+		p := NewFromViper(tag)
+		if p == nil {
+			t.Fatal("NewFromViper returned nil despite error")
+		}
+
+		// All slices should be empty but initialized
+		if got := p.resolvers.StringSlice(); len(got) != 0 {
+			t.Errorf("resolvers = %v; want empty slice", got)
+		}
+
+		if len(p.unavailableResolvers) != 0 {
+			t.Errorf("unavailableResolvers = %v; want empty slice", p.unavailableResolvers)
+		}
+
+		// Other fields should still be properly initialized
+		if p.Client == nil {
+			t.Error("Client should be non-nil even after unmarshal error")
+		}
+		if p.hcHealthCheck == nil {
+			t.Error("hcHealthCheck should be set to DefaultHealthCheckFunction")
+		}
+	})
+
+	t.Run("handles empty tag", func(t *testing.T) {
+		p := NewFromViper("")
+		if p == nil {
+			t.Fatal("NewFromViper returned nil for empty tag")
+		}
+
+		if p.resolvers != nil {
+			t.Errorf("resolvers = %v; want nil for empty tag", p.resolvers)
+		}
+
+		if p.viperResolversTag != "" {
+			t.Errorf("viperResolversTag = %q; want empty string", p.viperResolversTag)
+		}
+	})
 }
 func TestHealthDomainSuffixAccessors(t *testing.T) {
 	p := NewFromPoolSlice([]string{"1.1.1.1:53"})
@@ -334,6 +379,17 @@ func TestRefresh(t *testing.T) {
 		err := p.Refresh()
 		if err != ErrNilDnsClient {
 			t.Fatalf("Refresh() error = %v; want %v", err, ErrNilDnsClient)
+		}
+	})
+
+	t.Run("nil health check function returns error", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.mu.Lock()
+		p.hcHealthCheck = nil // force nil health check function
+		p.mu.Unlock()
+		err := p.Refresh()
+		if err != ErrNilHealthCheck {
+			t.Fatalf("Refresh() error = %v; want %v", err, ErrNilHealthCheck)
 		}
 	})
 
@@ -585,6 +641,36 @@ func TestHealthCheckQType(t *testing.T) {
 		}
 	})
 
+	t.Run("concurrent set and get operations", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		const workers = 100
+		var wg sync.WaitGroup
+		wg.Add(workers)
+
+		for i := 0; i < workers; i++ {
+			go func(n int) {
+				defer wg.Done()
+				qtype := dns.TypeA
+				if n%2 == 1 {
+					qtype = dns.TypeAAAA
+				}
+				p.SetHealthCheckQType(qtype)
+				got := p.HealthCheckQType()
+				if got != dns.TypeA && got != dns.TypeAAAA {
+					t.Errorf("unexpected qtype value: %d", got)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+	})
+
+	t.Run("nil pool set operation is safe", func(t *testing.T) {
+		var p *Pool = nil
+		// This should not panic
+		p.SetHealthCheckQType(dns.TypeAAAA)
+	})
+
 	t.Run("affects health check queries", func(t *testing.T) {
 		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
 		p.SetHealthDomainSuffix("hc.example.invalid.")
@@ -669,6 +755,45 @@ func TestRefreshNameServerTimeout(t *testing.T) {
 }
 
 func TestAutoRefresh(t *testing.T) {
+	t.Run("nil pool operation is safe", func(t *testing.T) {
+		var p *Pool = nil
+		// Should not panic
+		p.AutoRefresh(time.Second)
+	})
+
+	t.Run("handles nil logger gracefully", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(false, 10*time.Millisecond) // Will cause error
+		p.SetLogger(nil)
+
+		// Should not panic when Refresh errors without logger
+		interval := 50 * time.Millisecond
+		if interval <= 0 {
+			t.Fatal("test interval must be positive")
+		}
+		p.AutoRefresh(interval)
+		time.Sleep(100 * time.Millisecond)
+		p.AutoRefresh(0) // Stop
+	})
+
+	t.Run("multiple stop operations are safe", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(true, 10*time.Millisecond)
+
+		// Start and immediately stop multiple times
+		for i := 0; i < 3; i++ {
+			p.AutoRefresh(50 * time.Millisecond)
+			p.AutoRefresh(0)
+		}
+
+		// Double stop should be safe
+		p.AutoRefresh(50 * time.Millisecond)
+		p.AutoRefresh(0)
+		p.AutoRefresh(0)
+	})
+
 	t.Run("disables and re-enables auto-refresh with different intervals", func(t *testing.T) {
 		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
 		p.SetHealthDomainSuffix("hc.example.invalid.")
@@ -1415,6 +1540,172 @@ func TestExchangeContext(t *testing.T) {
 		}
 		if !resolverInOutput {
 			t.Errorf("missing resolver info, got: %q, expected: %q", output, formattedResolver)
+		}
+	})
+}
+
+func TestDebugAccessors(t *testing.T) {
+	t.Run("nil pool operations", func(t *testing.T) {
+		var p *Pool = nil
+		if got := p.Debug(); got != false {
+			t.Errorf("Debug() on nil pool = %v; want false", got)
+		}
+	})
+
+	t.Run("initial value is false", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		if got := p.Debug(); got != false {
+			t.Errorf("initial Debug() = %v; want false", got)
+		}
+	})
+
+	t.Run("set and get with logger", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		logger := logrus.New()
+		p.SetLogger(logger)
+
+		p.SetDebug(true)
+		if got := p.Debug(); got != true {
+			t.Errorf("Debug() after setting true = %v; want true", got)
+		}
+
+		p.SetDebug(false)
+		if got := p.Debug(); got != false {
+			t.Errorf("Debug() after setting false = %v; want false", got)
+		}
+	})
+
+	t.Run("set with nil logger", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetLogger(nil)
+		p.SetDebug(true)
+		if got := p.Debug(); got != true {
+			t.Errorf("Debug() after setting true with nil logger = %v; want true", got)
+		}
+	})
+}
+
+func TestLastRefreshedAccessors(t *testing.T) {
+	t.Run("nil pool returns zero time", func(t *testing.T) {
+		var p *Pool = nil
+		if got := p.LastRefreshed(); !got.IsZero() {
+			t.Errorf("LastRefreshed() on nil pool = %v; want zero time", got)
+		}
+	})
+
+	t.Run("initial value is zero time", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		if got := p.LastRefreshed(); !got.IsZero() {
+			t.Errorf("initial LastRefreshed() = %v; want zero time", got)
+		}
+	})
+
+	t.Run("updates after refresh", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(true, 10*time.Millisecond)
+
+		before := p.LastRefreshed()
+		err := p.Refresh()
+		if err != nil {
+			t.Fatalf("Refresh() error = %v", err)
+		}
+
+		after := p.LastRefreshed()
+		if after.IsZero() {
+			t.Error("LastRefreshed() still zero after refresh")
+		}
+		if !after.After(before) {
+			t.Errorf("LastRefreshed() = %v is not after %v", after, before)
+		}
+	})
+}
+
+func TestHealthCheckFunctionAccessors(t *testing.T) {
+	t.Run("nil pool operations", func(t *testing.T) {
+		var p *Pool = nil
+		if got := p.HealthCheckFunction(); got != nil {
+			t.Errorf("HealthCheckFunction() on nil pool = %v; want nil", got)
+		}
+		// Should not panic
+		p.SetHealthCheckFunction(nil)
+	})
+
+	t.Run("defaults to DefaultHealthCheckFunction", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		got := p.HealthCheckFunction()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(DefaultHealthCheckFunction).Pointer() {
+			t.Error("HealthCheckFunction() did not return DefaultHealthCheckFunction")
+		}
+	})
+
+	t.Run("set nil restores default", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		custom := func(ans dns.Msg, t time.Duration, p *Pool) bool { return true }
+		p.SetHealthCheckFunction(custom)
+		p.SetHealthCheckFunction(nil) // Should restore default
+
+		got := p.HealthCheckFunction()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(DefaultHealthCheckFunction).Pointer() {
+			t.Error("setting nil did not restore DefaultHealthCheckFunction")
+		}
+	})
+
+	t.Run("custom function is used in Refresh", func(t *testing.T) {
+		resolvers := []string{"1.1.1.1:53"}
+		p := NewFromPoolSlice(resolvers)
+		p.SetHealthDomainSuffix("hc.example.invalid.")
+		p.Client = newMockClient(true, 10*time.Millisecond)
+
+		customCalled := false
+		custom := func(ans dns.Msg, t time.Duration, pool *Pool) bool {
+			customCalled = true
+			return true
+		}
+		p.SetHealthCheckFunction(custom)
+
+		err := p.Refresh()
+		if err != nil {
+			t.Fatalf("Refresh() error = %v; want nil", err)
+		}
+
+		if !customCalled {
+			t.Error("custom health check function was not called during Refresh")
+		}
+
+		if got := p.AvailableCount(); got != 1 {
+			t.Errorf("AvailableCount = %d; want 1 (custom function returned true)", got)
+		}
+	})
+
+	t.Run("concurrent access is safe", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		const workers = 100
+		var wg sync.WaitGroup
+		wg.Add(workers)
+
+		custom1 := func(ans dns.Msg, t time.Duration, p *Pool) bool { return true }
+		custom2 := func(ans dns.Msg, t time.Duration, p *Pool) bool { return false }
+
+		for i := 0; i < workers; i++ {
+			go func(n int) {
+				defer wg.Done()
+				if n%2 == 0 {
+					p.SetHealthCheckFunction(custom1)
+				} else {
+					p.SetHealthCheckFunction(custom2)
+				}
+				_ = p.HealthCheckFunction()
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Verify we can still set and get after concurrent access
+		p.SetHealthCheckFunction(custom1)
+		got := p.HealthCheckFunction()
+		if reflect.ValueOf(got).Pointer() != reflect.ValueOf(custom1).Pointer() {
+			t.Error("HealthCheckFunction not properly set after concurrent access")
 		}
 	})
 }
