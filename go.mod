@@ -1,4 +1,4 @@
-module github.com/nerdlem/nspool
+module github.com/nerdlem/nspool/v2
 
 go 1.25.1
 
