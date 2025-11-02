@@ -108,13 +108,13 @@ Log = logrus.New()
 nsp := nspool.NewFromViper("dns.resolvers")
   ⋮
 // Enable logging from the nameserver pool
-nsp.Logger(Log)
+nsp.SetLogger(Log)
 ```
 
 Logging can be disabled as follows:
 
 ```go
-nsp.Logger(nil)
+nsp.SetLogger(nil)
 ```
 
 ## The health-check function

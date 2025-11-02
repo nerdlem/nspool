@@ -246,6 +246,28 @@ func (p *Pool) SetDebug(enabled bool) {
 	p.debug = enabled
 }
 
+// SetLogger sets the logger to be used for debug and error messages.
+// Pass nil to disable logging.
+func (p *Pool) SetLogger(l *logrus.Logger) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.logger = l
+}
+
+// Logger returns the current logger used by the pool.
+// Returns nil if no logger is set or if the pool is nil.
+func (p *Pool) Logger() *logrus.Logger {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.logger
+}
+
 // Refresh implements health checking of the candidate resolvers. It will iterate
 // over each candidate through a workerpool issuing queries in parallel fashion.
 // Candidate resolvers that pass the test will be added to the availableResolvers

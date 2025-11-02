@@ -1419,6 +1419,68 @@ func TestExchangeContext(t *testing.T) {
 	})
 }
 
+func TestLoggerAccessors(t *testing.T) {
+	t.Run("nil pool operations", func(t *testing.T) {
+		var p *Pool = nil
+		if got := p.Logger(); got != nil {
+			t.Errorf("Logger() on nil pool = %v; want nil", got)
+		}
+		// Should not panic
+		p.SetLogger(logrus.New())
+	})
+
+	t.Run("set and get logger", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+
+		// Initially nil
+		if got := p.Logger(); got != nil {
+			t.Errorf("initial Logger() = %v; want nil", got)
+		}
+
+		// Set and verify
+		logger := logrus.New()
+		p.SetLogger(logger)
+		if got := p.Logger(); got != logger {
+			t.Errorf("Logger() after set = %v; want %v", got, logger)
+		}
+
+		// Set nil and verify
+		p.SetLogger(nil)
+		if got := p.Logger(); got != nil {
+			t.Errorf("Logger() after set nil = %v; want nil", got)
+		}
+	})
+
+	t.Run("concurrent access is safe", func(t *testing.T) {
+		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+		logger := logrus.New()
+
+		const workers = 100
+		var wg sync.WaitGroup
+		wg.Add(workers)
+
+		for i := 0; i < workers; i++ {
+			go func(n int) {
+				defer wg.Done()
+				if n%2 == 0 {
+					p.SetLogger(logger)
+				} else {
+					p.SetLogger(nil)
+				}
+				_ = p.Logger()
+			}(i)
+		}
+
+		wg.Wait()
+
+		// Verify we can still set and get after concurrent access
+		p.SetLogger(logger)
+		if got := p.Logger(); got != logger {
+			t.Errorf("Logger() after concurrent access = %v; want %v", got, logger)
+		}
+	})
+}
+
 func TestDefaultHealthCheckFunction(t *testing.T) {
 	t.Run("success returns true", func(t *testing.T) {
 		msg := dns.Msg{}
