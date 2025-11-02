@@ -379,15 +379,19 @@ func (p *Pool) Refresh() error {
 	for _, resolver := range p.resolvers {
 		res := resolver // capture loop variable
 		task := func() {
-			// generate query name
+			// generate query name once
 			label := p.hcNameGenerator()
 			name := dns.Fqdn(label + "." + p.hcDomainSuffix)
-			m := new(dns.Msg)
-			m.SetQuestion(name, p.hcQType)
 
 			healthy := false
 			var lastErr error
 			for i := 0; i < retries; i++ {
+				// Create a new message for each attempt to avoid any potential
+				// concurrent modification issues
+				m := new(dns.Msg)
+				m.SetQuestion(name, p.hcQType)
+				m.RecursionDesired = true // Explicitly request recursion
+
 				ctx, cancel := context.WithTimeout(context.Background(), p.hcResolverTimeout)
 				start := time.Now()
 				ans, _, err := p.Client.ExchangeContext(ctx, m, addPort(res))
@@ -395,13 +399,27 @@ func (p *Pool) Refresh() error {
 				elapsed := time.Since(start)
 				lastErr = err
 				if err == nil && ans != nil {
-					if p.hcHealthCheck(*ans, elapsed, p) {
-						healthy = true
-						break
+					// Verify the response has a valid question section matching our query
+					if len(ans.Question) > 0 && ans.Question[0].Name == name && ans.Question[0].Qtype == p.hcQType {
+						if p.hcHealthCheck(*ans, elapsed, p) {
+							healthy = true
+							break
+						}
+					} else if p.debug && p.logger != nil {
+						p.logger.WithFields(logrus.Fields{
+							"resolver":     res,
+							"query_name":   name,
+							"query_type":   p.hcQType,
+							"has_question": len(ans.Question) > 0,
+							"answer_name": func() string {
+								if len(ans.Question) > 0 {
+									return ans.Question[0].Name
+								}
+								return "<empty>"
+							}(),
+						}).Debug("received DNS response with invalid question section")
 					}
-				}
-
-				// small backoff between retries
+				} // small backoff between retries
 				time.Sleep(50 * time.Millisecond)
 			}
 
