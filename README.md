@@ -1,7 +1,8 @@
 [![GoDoc](https://godoc.org/github.com/nerdlem/nspool?status.svg)](https://godoc.org/github.com/nerdlem/nspool)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nerdlem/nspool)](https://goreportcard.com/report/github.com/nerdlem/nspool)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-# nspool — Work with healthy subset of a constellation of DNS (recursive, caching) resolvers
+# nspool — Work with healthy subset of a constellation of DNS (recursive, caching) resolvers
 
 This module is a merge of my private version of the nspool library dating back to 2014, modernized. It has been run through various tools to expand documentation, provide comments and better adapt to contemporary Go practices.
 

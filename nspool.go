@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Luis E. Muñoz. All Rights Reserved.
+// SPDX-License-Identifier: MIT
+
 package nspool
 
 // Package nspool manages a pool of upstream DNS resolvers and the health-check
