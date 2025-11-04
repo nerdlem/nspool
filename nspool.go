@@ -54,6 +54,9 @@ var (
 	// ErrNilHealthCheck is returned when Refresh() is called and the health check
 	// function is nil.
 	ErrNilHealthCheck = fmt.Errorf("nil health check function")
+	// ErrRefreshAbortedByPreHook is returned when the pre-refresh hook returns false,
+	// preventing the refresh operation from proceeding.
+	ErrRefreshAbortedByPreHook = fmt.Errorf("refresh aborted by pre-hook")
 )
 
 // HealthLabelGenerator is the signature for a function that generates the label
@@ -69,6 +72,20 @@ type HealthLabelGenerator func() string
 //
 //	resolver as unavailable for use.
 type HealthCheckFunction func(dns.Msg, time.Duration, *Pool) bool
+
+// RefreshPreHook is the signature for a function called before Refresh() starts.
+// It receives a pointer to the Pool being refreshed and must return a boolean.
+// If it returns false, the Refresh() operation is aborted and Refresh() returns
+// an error. This hook can be used to implement conditions under which refresh
+// should not proceed, or to log/track refresh attempts.
+type RefreshPreHook func(*Pool) bool
+
+// RefreshPostHook is the signature for a function called after Refresh() completes.
+// It receives a pointer to the Pool that was just refreshed. This hook has no
+// return value and is called regardless of whether the refresh succeeded or failed.
+// It can be used to log results, update metrics, or trigger other actions based
+// on the refresh outcome.
+type RefreshPostHook func(*Pool)
 
 // DnsClientLike is an interface that should accept dns.Client. This is used to
 // facilitate testing and allowing easier overriding to support special use cases.
@@ -96,6 +113,8 @@ type Pool struct {
 	mu                    sync.Mutex
 	muRefresh             sync.Mutex
 	queryTimeout          time.Duration
+	refreshPreHook        RefreshPreHook
+	refreshPostHook       RefreshPostHook
 	resolvers             FileArray
 	unavailableResolvers  []string
 	viperResolversTag     string
@@ -142,6 +161,35 @@ func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, p *Pool) bool {
 		return false
 	}
 	return true
+}
+
+// DefaultRefreshPreHook is the default pre-refresh hook that always allows
+// the refresh to proceed. This function serves as an example and documentation
+// for implementing custom pre-refresh hooks.
+//
+// Example usage:
+//
+//	nsp.SetRefreshPreHook(func(p *nspool.Pool) bool {
+//	    // Only allow refresh during off-peak hours
+//	    hour := time.Now().Hour()
+//	    return hour < 8 || hour > 18
+//	})
+func DefaultRefreshPreHook(p *Pool) bool {
+	return true
+}
+
+// DefaultRefreshPostHook is the default post-refresh hook that does nothing.
+// This function serves as an example and documentation for implementing custom
+// post-refresh hooks.
+//
+// Example usage:
+//
+//	nsp.SetRefreshPostHook(func(p *nspool.Pool) {
+//	    log.Printf("Refresh complete: %d available, %d unavailable",
+//	        p.AvailableCount(), p.UnavailableCount())
+//	})
+func DefaultRefreshPostHook(p *Pool) {
+	// No-op by default
 }
 
 // NewFromPoolSlice returns a newly configured Pool primed with the resolvers
@@ -300,6 +348,52 @@ func (p *Pool) HealthCheckFunction() HealthCheckFunction {
 	return p.hcHealthCheck
 }
 
+// SetRefreshPreHook sets the function that will be called before each Refresh()
+// operation. If the hook returns false, the refresh will be aborted and Refresh()
+// will return ErrRefreshAbortedByPreHook. Pass nil to disable the pre-hook.
+func (p *Pool) SetRefreshPreHook(fn RefreshPreHook) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshPreHook = fn
+}
+
+// RefreshPreHook returns the current pre-refresh hook function.
+// Returns nil if no hook is set or if the pool is nil.
+func (p *Pool) RefreshPreHook() RefreshPreHook {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.refreshPreHook
+}
+
+// SetRefreshPostHook sets the function that will be called after each Refresh()
+// operation completes, regardless of success or failure. Pass nil to disable
+// the post-hook.
+func (p *Pool) SetRefreshPostHook(fn RefreshPostHook) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshPostHook = fn
+}
+
+// RefreshPostHook returns the current post-refresh hook function.
+// Returns nil if no hook is set or if the pool is nil.
+func (p *Pool) RefreshPostHook() RefreshPostHook {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.refreshPostHook
+}
+
 // Refresh implements health checking of the candidate resolvers. It will iterate
 // over each candidate through a workerpool issuing queries in parallel fashion.
 // Candidate resolvers that pass the test will be added to the availableResolvers
@@ -308,6 +402,12 @@ func (p *Pool) HealthCheckFunction() HealthCheckFunction {
 // The whole Refresh() cycle is protected so there can only be one Refresh() running
 // at a time. Concurrent attempts will serialize. Refresh() will return an error if
 // HealthDomainSuffix() has not been called with a valid domain name suffix.
+//
+// If a pre-refresh hook is set, it will be called before the refresh starts. If the
+// hook returns false, the refresh is aborted and ErrRefreshAbortedByPreHook is returned.
+//
+// If a post-refresh hook is set, it will be called after the refresh completes,
+// regardless of success or failure (except when aborted by the pre-hook).
 //
 // If a logger has been set, significant events will be logged as Info(). If the debug
 // flag has been set via SetDebug(), more detailed logging will be provided via
@@ -319,6 +419,20 @@ func (p *Pool) Refresh() error {
 
 	p.muRefresh.Lock()
 	defer p.muRefresh.Unlock()
+
+	// Call pre-hook if set
+	if p.refreshPreHook != nil {
+		if !p.refreshPreHook(p) {
+			return ErrRefreshAbortedByPreHook
+		}
+	}
+
+	// Ensure post-hook is called when we return (unless aborted by pre-hook)
+	defer func() {
+		if p.refreshPostHook != nil {
+			p.refreshPostHook(p)
+		}
+	}()
 
 	if p.Client == nil {
 		return ErrNilDnsClient

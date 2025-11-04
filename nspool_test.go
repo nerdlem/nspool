@@ -1949,3 +1949,303 @@ func TestDefaultHealthCheckFunction(t *testing.T) {
 		}
 	})
 }
+
+// TestRefreshPreHook tests the pre-refresh hook functionality
+func TestRefreshPreHook(t *testing.T) {
+t.Run("pre-hook allows refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+called := false
+p.SetRefreshPreHook(func(pool *Pool) bool {
+called = true
+return true
+})
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() failed: %v", err)
+}
+if !called {
+t.Fatal("pre-hook was not called")
+}
+})
+
+t.Run("pre-hook aborts refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+called := false
+p.SetRefreshPreHook(func(pool *Pool) bool {
+called = true
+return false
+})
+
+err := p.Refresh()
+if err != ErrRefreshAbortedByPreHook {
+t.Fatalf("expected ErrRefreshAbortedByPreHook, got: %v", err)
+}
+if !called {
+t.Fatal("pre-hook was not called")
+}
+})
+
+t.Run("pre-hook receives correct pool pointer", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+var receivedPool *Pool
+p.SetRefreshPreHook(func(pool *Pool) bool {
+receivedPool = pool
+return true
+})
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() failed: %v", err)
+}
+if receivedPool != p {
+t.Fatal("pre-hook received wrong pool pointer")
+}
+})
+
+t.Run("nil pre-hook allows refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+p.SetRefreshPreHook(nil)
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() with nil pre-hook failed: %v", err)
+}
+})
+}
+
+// TestRefreshPostHook tests the post-refresh hook functionality
+func TestRefreshPostHook(t *testing.T) {
+t.Run("post-hook called after successful refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+called := false
+p.SetRefreshPostHook(func(pool *Pool) {
+called = true
+})
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() failed: %v", err)
+}
+if !called {
+t.Fatal("post-hook was not called after successful refresh")
+}
+})
+
+t.Run("post-hook called even after failed refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+// Don't set domain suffix to cause refresh to fail
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+called := false
+p.SetRefreshPostHook(func(pool *Pool) {
+called = true
+})
+
+err := p.Refresh()
+if err == nil {
+t.Fatal("expected error from Refresh() without domain suffix")
+}
+if !called {
+t.Fatal("post-hook was not called after failed refresh")
+}
+})
+
+t.Run("post-hook receives correct pool pointer", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+var receivedPool *Pool
+p.SetRefreshPostHook(func(pool *Pool) {
+receivedPool = pool
+})
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() failed: %v", err)
+}
+if receivedPool != p {
+t.Fatal("post-hook received wrong pool pointer")
+}
+})
+
+t.Run("post-hook NOT called when aborted by pre-hook", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+postCalled := false
+p.SetRefreshPreHook(func(pool *Pool) bool {
+return false // Abort refresh
+})
+p.SetRefreshPostHook(func(pool *Pool) {
+postCalled = true
+})
+
+err := p.Refresh()
+if err != ErrRefreshAbortedByPreHook {
+t.Fatalf("expected ErrRefreshAbortedByPreHook, got: %v", err)
+}
+if postCalled {
+t.Fatal("post-hook should not be called when pre-hook aborts refresh")
+}
+})
+
+t.Run("nil post-hook does not cause error", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+p.SetRefreshPostHook(nil)
+
+err := p.Refresh()
+if err != nil {
+t.Fatalf("Refresh() with nil post-hook failed: %v", err)
+}
+})
+}
+
+// TestRefreshHookAccessors tests the accessor methods for refresh hooks
+func TestRefreshHookAccessors(t *testing.T) {
+t.Run("pre-hook accessor", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+
+// Initially nil
+if p.RefreshPreHook() != nil {
+t.Fatal("expected nil pre-hook initially")
+}
+
+// Set and get
+hook := func(pool *Pool) bool { return true }
+p.SetRefreshPreHook(hook)
+
+retrieved := p.RefreshPreHook()
+if retrieved == nil {
+t.Fatal("expected non-nil pre-hook after setting")
+}
+
+// Clear by setting nil
+p.SetRefreshPreHook(nil)
+if p.RefreshPreHook() != nil {
+t.Fatal("expected nil pre-hook after clearing")
+}
+})
+
+t.Run("post-hook accessor", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+
+// Initially nil
+if p.RefreshPostHook() != nil {
+t.Fatal("expected nil post-hook initially")
+}
+
+// Set and get
+hook := func(pool *Pool) {}
+p.SetRefreshPostHook(hook)
+
+retrieved := p.RefreshPostHook()
+if retrieved == nil {
+t.Fatal("expected non-nil post-hook after setting")
+}
+
+// Clear by setting nil
+p.SetRefreshPostHook(nil)
+if p.RefreshPostHook() != nil {
+t.Fatal("expected nil post-hook after clearing")
+}
+})
+
+t.Run("nil pool handling", func(t *testing.T) {
+var p *Pool = nil
+
+// Should not panic
+p.SetRefreshPreHook(func(pool *Pool) bool { return true })
+p.SetRefreshPostHook(func(pool *Pool) {})
+
+if p.RefreshPreHook() != nil {
+t.Fatal("expected nil from nil pool")
+}
+if p.RefreshPostHook() != nil {
+t.Fatal("expected nil from nil pool")
+}
+})
+}
+
+// TestRefreshHooksWithAutoRefresh tests that hooks work with auto-refresh
+func TestRefreshHooksWithAutoRefresh(t *testing.T) {
+t.Run("hooks called during auto-refresh", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+p.SetHealthDomainSuffix("example.com")
+p.Client = &mockDNSClient{success: true, delay: 10 * time.Millisecond}
+
+preCallCount := 0
+postCallCount := 0
+
+p.SetRefreshPreHook(func(pool *Pool) bool {
+preCallCount++
+return true
+})
+p.SetRefreshPostHook(func(pool *Pool) {
+postCallCount++
+})
+
+// Start auto-refresh with very short interval
+p.AutoRefresh(100 * time.Millisecond)
+defer p.AutoRefresh(0) // Stop auto-refresh
+
+// Wait for at least 2 refresh cycles
+time.Sleep(250 * time.Millisecond)
+
+if preCallCount < 2 {
+t.Fatalf("expected at least 2 pre-hook calls, got %d", preCallCount)
+}
+if postCallCount < 2 {
+t.Fatalf("expected at least 2 post-hook calls, got %d", postCallCount)
+}
+})
+}
+
+// TestDefaultRefreshHooks tests the default hook implementations
+func TestDefaultRefreshHooks(t *testing.T) {
+t.Run("default pre-hook always returns true", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+result := DefaultRefreshPreHook(p)
+if !result {
+t.Fatal("DefaultRefreshPreHook should return true")
+}
+})
+
+t.Run("default pre-hook with nil pool", func(t *testing.T) {
+result := DefaultRefreshPreHook(nil)
+if !result {
+t.Fatal("DefaultRefreshPreHook should return true even with nil pool")
+}
+})
+
+t.Run("default post-hook does not panic", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"1.1.1.1:53"})
+// Should not panic
+DefaultRefreshPostHook(p)
+})
+
+t.Run("default post-hook with nil pool", func(t *testing.T) {
+// Should not panic
+DefaultRefreshPostHook(nil)
+})
+}

@@ -1,234 +1,78 @@
+# nspool — DNS Resolver Pool with Health Checking
+
 [![GoDoc](https://godoc.org/github.com/nerdlem/nspool/v2?status.svg)](https://godoc.org/github.com/nerdlem/nspool/v2)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nerdlem/nspool/v2)](https://goreportcard.com/report/github.com/nerdlem/nspool/v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-# nspool — Work with healthy subset of a constellation of DNS (recursive, caching) resolvers
+A Go library for managing a pool of DNS resolvers with automatic health checking, failover, and retry logic.
 
-This module is a merge of my private version of the nspool library dating back to 2014, modernized. It has been run through various tools to expand documentation, provide comments and better adapt to contemporary Go practices.
+## Features
 
-This module provides a basic schema for using a group of nameservers provided that they pass a basic health check. It also supports selecting subsets of name servers that respond within a specific threshold.
+- **Health Checking**: Periodic validation of resolver availability
+- **Automatic Failover**: Queries automatically retry on different resolvers
+- **Configurable**: Timeouts, retry counts, worker pools, and health check behavior
+- **Thread-Safe**: Concurrent refresh and query operations
+- **Refresh Hooks**: Pre and post-refresh callbacks for logging and metrics
+- **Viper Integration**: Dynamic configuration from config files
 
-> This code should always be used with recursive resolvers and authoritative nameservers you control and operate yourself, or that you are authorized to use. Sending large amounts of DNS queries indiscriminately will often be construed as abusive and can result in complaints to your ISP or blacklisting.
+## Installation
 
-The initial name server pool can be provided via the constructor function.
-
-```go
- // Initialize the pool with an explicit, fixed set of nameservers
- nsp := nspool.NewFromSlice([]string{"ns1.resolver.example:53", 
-                                         "ns2.resolver.example:53"})
+```bash
+go get github.com/nerdlem/nspool/v2
 ```
 
- It can also be specified as a selector for `viper.GetStringSlice()`, which provides for a handy way to update the set of resolvers on the fly provided that your code handles automatic config file changes.
+## Quick Start
 
 ```go
-// Initialize the pool with whatever name servers are provided via the config
-nsp := nspool.NewFromViper("dns.resolvers")
-```
+import "github.com/nerdlem/nspool/v2"
 
-In the example above, your TOML config file could have something like this:
+// Create pool with resolver addresses
+nsp := nspool.NewFromPoolSlice([]string{"1.1.1.1:53", "8.8.8.8:53"})
 
-```toml
-[dns]
-resolvers = [ "ns1.resolver.example:53", "ns2.resolver.example:53" ]
-```
+// Configure health checking
+nsp.SetHealthDomainSuffix("example.com")
+nsp.SetMinResolvers(1)
 
-## DNS resolver health checks
-
-Health checks are performed in parallel using a configurable number of worker goroutines. You can control the concurrency using:
-
-```go
-// Get current worker pool size (default is 64)
-workers := nsp.HealthCheckWorkerSize()
-
-// Set to a different size (use 1 for serial processing)
-nsp.SetHealthCheckWorkerSize(32)
-```
-
-When the automatic timer triggers or the `Refresh()` method is invoked, the following actions will be taken:
-
-* If the pool was initialized from `viper`, the list of candidate resolvers will be pulled.
-* A query to a randomly generated FQDN under the `HealthDomainSuffix()` domain will be sent to each candidate nameserver.
-* The response will be tallied and checked against the validation function.
-* Candidate nameservers that respond within the allocated time and for whom the validation function returns a `true` value are marked as available.
-* All remaining nameservers are marked as unavailable.
-
-Candidate nameservers marked as available can be used to submit queries.
-
-Query submission and random nameserver selection will either return and error or block—depending on whether an automatic refresh has been requested—when less than the minimum number of available nameservers are present.
-
-Note that `Refresh()` will briefly block query operations to the pool.
-
-Duration performs its checks using an internal worker pool whose size can be configured via the `RefreshWorkers()` method.
-
-The time to wait for a response from each candidate nameserver is controlled by the `RefreshNameserverTimeout(t time.Duration)`. It defaults to `10s` which is probably fine for a small number of resolvers under your control and in close network proximity. Your code can use a construct like this for setting up the pool:
-
-```go
-viper.SetDefault("dns.resolver_health_timeout", "10s")
-  ⋮
-nsp.RefreshNameserverTimeout(viper.GetDuration("dns.resolver_health_timeout"))
-```
-
-For applications performing many DNS queries and using a wider base of resolvers at differrent locations, you will probably need a much longer interval as the test itself can take a long time. Verbose logging will provide hopefully helpful information to tune this value.
-
-### Random hostname generation
-
-Random hostnames are generated using a function following this signature
-
-```go
-type HealthLabelGenerator func() string
-```
-
-The default implementation of this function returns a random 16 character alphanumeric string, which is then concatenated with `HealthDomainSuffix()` to generate a random hostname. This process is repeated once per health check with the same FQDN being used to probe all candidate resolvers.
-
-Note that `HealthDomainSuffix()` should be set to a domain or subdomain under your control, for which you provide authoritative name services. Pointing this to a domain managed elsewhere can be abusive.
-
-This example shows how this function can be overriden to use a specific hostname:
-
-```go
-nsp.HealthLabelGenerator(func() { return "fixed-label" })
-```
-
-Using this approach allows prospective resolvers to answer the query from their cache. This check is lighter in resources at both the candidate resolvers and your own authoritative nameservers for `HealthDomainSuffix()`.
-
-## Automatic nameserver refreshing
-
-The `nsp.AutoRefresh(t time.Duration)` function can be used to request that the pool issues a `Refresh()` each `t` interval. Typical usage is as follows:
-
-```go
-viper.SetDefault("dns.auto_refresh", "5m")
-  ⋮
-nsp.AutoRefresh(viper.GetDuration("dns.auto_refresh"))
-```
-
-## Retrying failed queries
-
-The `nsp.SetMaxQueryRetries(n int)` method configures how many times a failed query will be retried with different resolvers before giving up. You can use `nsp.MaxQueryRetries()` to get the current retry limit. This affects both health checks and regular DNS queries when using `nsp.Exchange()` and `nsp.ExchangeContext()`.
-
-For example:
-```go
-// Set maximum retries to 5 (up to 6 total attempts)
-nsp.SetMaxQueryRetries(5)
-
-// Get current retry limit
-retries := nsp.MaxQueryRetries()
-```
-
-A value of 0 means only one attempt will be made (no retries). Negative values are treated as 0. The default value is 3 retries.
-
-Queries failing due to timeouts or networking issues are retried automatically on different resolvers—up to the configured retry limit—on behalf of the caller. Each retry uses a different randomly selected resolver from the available pool.
-
-## Logging with logrus
-
-This module can use the [github.com/sirupsen/logrus](https://github.com/sirupsen/logrus) logging library to log query failures and other exceptional conditions. In order to enable this behavior, you need to follow this example:
-
-```go
-// Create and maybe configure your logging object
-Log = logrus.New()
-  ⋮
-// Create your nameserver pool
-nsp := nspool.NewFromViper("dns.resolvers")
-  ⋮
-// Enable logging from the nameserver pool
-nsp.SetLogger(Log)
-```
-
-Logging can be disabled as follows:
-
-```go
-nsp.SetLogger(nil)
-```
-
-## The health-check function
-
-This is a user-supplied function that verifies the response of the periodic nameserver health check and returns a boolean value to inform the pool about the health status of each nameserver. A `true` value indicates a healthy, usable resolver while a `false` value indicates that the resolver should not be used.
-
-The module includes a default health-check function `DefaultHealtCheck` that returns `true` when the nameserver response was successful. You can provide custom functions for more case-specific tests. This is an example:
-
-```go
-// myHealthCheck is a custom function satisfying the nspool.HealthCheckFunc inerface.
-// It checks that the response came in under 10 secods, that the response was successful
-// (NOERROR), that it includes at least one RR in the answer section, that the first RR
-// in the answer section is an A RR and that the IP address in the A record is the magic
-// number 42.42.42.42
-//
-// This can easily be arranged by providing a wildcard record on a specific subdomain on
-// a zone under your control.
-func myHealthCheck(resp *dns.Msg, t time.Duration, p *nspool.Pool) bool {
-    if t < 10 * time.Second {
-        if resp.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-            if a, ok := resp.Answer[0].(*dns.A); ok {
-                return a.A.String() == "42.42.42.42"
-            }
-        }
-    }
-    return false
+// Perform initial health check
+if err := nsp.Refresh(); err != nil {
+    log.Fatal(err)
 }
-  ⋮
-// Tell the pool to use your custom health check function
-nsp.SetHealthCheckFunction(myHealthCheck)
+
+// Query DNS using the pool
+msg := new(dns.Msg)
+msg.SetQuestion("github.com.", dns.TypeA)
+response, _, err := nsp.Exchange(msg)
 ```
 
-# Performing DNS queries
+## Use Cases
 
-The pool can be used directly to perform DNS queries as follows. In the first example, we use a `context` to provide a specific timeout for this query.
+### Basic Resolver Pool
+Create and use a pool of DNS resolvers with automatic health checking.
 
-```go
-// Initialize (and maybe configure) your nameserver pool
-nsp := nspool.NewFromViper("dns.resolvers")
-  ⋮
-// Setup a context to use to handle the DNS query
-ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration("dns.processing_timeout"))
-defer cancel()
-  ⋮
-// Create the DNS query, look for the SOA of domain.example
-qSOA := new(dns.Msg)
-qSOA.SetQuestion("domain.example", dns.TypeSOA)
-qSOA.RecursionDesired = true
+### Configuration from Viper
+Load resolver configuration from config files with hot-reload support.
 
-// Send the DNS query to a randomly selected nameserver
-r, _, err := nsp.ExchangeContext(ctx, qSOA)
-if err != nil {
-    return err
-}
-```
+### Custom Health Checks
+Implement custom validation logic to verify resolver responses.
 
-In this example, the DNS query does not use a `context`.
+### Refresh Hooks
+Add pre/post-refresh callbacks for logging, metrics, or conditional refresh.
 
-```go
-// Initialize (and maybe configure) your nameserver pool
-nsp := nspool.NewFromViper("dns.resolvers")
-  ⋮
-// Create the DNS query, look for the SOA of domain.example
-qSOA := new(dns.Msg)
-qSOA.SetQuestion("domain.example", dns.TypeSOA)
-qSOA.RecursionDesired = true
+### Auto-Refresh
+Automatically refresh resolver health at regular intervals.
 
-// Send the DNS query to a randomly selected nameserver
-r, _, err := nsp.Exchange(qSOA)
-if err != nil {
-    return err
-}
-```
+## Documentation
 
-You can also obtain a randomly selected nameserver directly and use it in your code, for better control.
+Full documentation with examples is available at [pkg.go.dev/github.com/nerdlem/nspool/v2](https://pkg.go.dev/github.com/nerdlem/nspool/v2).
 
-```go
-// Initialize (and maybe configure) your nameserver pool and DNS client
-nsp := nspool.NewFromViper("dns.resolvers")
-c := new(dns.Client)
-  ⋮
-// Setup a context to use to handle the DNS query
-ctx, cancel := context.WithTimeout(context.Background(), viper.GetDuration("dns.processing_timeout"))
-defer cancel()
-  ⋮
-// Create the DNS query, look for the SOA of domain.example
-qSOA := new(dns.Msg)
-qSOA.SetQuestion("domain.example", dns.TypeSOA)
-qSOA.RecursionDesired = true
+## Important Note
 
-// Send the DNS query to a randomly selected nameserver.
-r, _, err := c.ExchangeContext(ctx, qSOA, nsp.GetRandomNameserver())
-if err != nil {
-    return err
-}
-```
+**This code should only be used with recursive resolvers you control, operate, or are authorized to use.** Sending large volumes of DNS queries to public resolvers may be considered abusive and can result in complaints or blacklisting.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Author
+
+Luis E. Muñoz
