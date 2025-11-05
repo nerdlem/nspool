@@ -825,7 +825,8 @@ func (p *Pool) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, time.
 
 // GetRandomResolver returns a randomly selected resolver from the pool of available
 // resolvers. It returns an error if the number of available resolvers is less than
-// the minimum required threshold.
+// the minimum required threshold. The returned resolver address will have `:53`
+// appended if no port is present.
 func (p *Pool) GetRandomResolver() (string, error) {
 	if p == nil {
 		return "", ErrNilPool
@@ -839,7 +840,16 @@ func (p *Pool) GetRandomResolver() (string, error) {
 	}
 
 	idx := rand.Intn(len(p.availableResolvers))
-	return p.availableResolvers[idx], nil
+	resolver := p.availableResolvers[idx]
+	
+	// Ensure resolver has a port
+	// naive check: if contains colon assume port present (covers IPv6 too in most cases)
+	for i := len(resolver) - 1; i >= 0; i-- {
+		if resolver[i] == ':' {
+			return resolver, nil
+		}
+	}
+	return resolver + ":53", nil
 }
 
 // AutoRefresh enables automatic refresh of resolver health checks at the interval
