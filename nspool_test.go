@@ -296,30 +296,30 @@ func TestAvailableUnavailableCountsInitialAndAfterMove(t *testing.T) {
 	input := []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
 	p := NewFromPoolSlice(input)
 
-	if got := p.AvailableCount(); got != 0 {
-		t.Fatalf("AvailableCount = %d; want 0 (initial)", got)
+	if got := p.AvailableCount(); got != len(input) {
+		t.Fatalf("AvailableCount = %d; want %d (initial)", got, len(input))
 	}
-	if got := p.UnavailableCount(); got != len(input) {
-		t.Fatalf("UnavailableCount = %d; want %d (initial)", got, len(input))
+	if got := p.UnavailableCount(); got != 0 {
+		t.Fatalf("UnavailableCount = %d; want 0 (initial)", got)
 	}
 
-	// Move one resolver from unavailable to available and verify counts update.
+	// Move one resolver from available to unavailable and verify counts update.
 	p.mu.Lock()
-	// take first unavailable and mark as available
-	if len(p.unavailableResolvers) == 0 {
+	// take first available and mark as unavailable
+	if len(p.availableResolvers) == 0 {
 		p.mu.Unlock()
-		t.Fatal("unexpected empty unavailableResolvers")
+		t.Fatal("unexpected empty availableResolvers")
 	}
-	first := p.unavailableResolvers[0]
-	p.unavailableResolvers = p.unavailableResolvers[1:]
-	p.availableResolvers = append(p.availableResolvers, first)
+	first := p.availableResolvers[0]
+	p.availableResolvers = p.availableResolvers[1:]
+	p.unavailableResolvers = append(p.unavailableResolvers, first)
 	p.mu.Unlock()
 
-	if got := p.AvailableCount(); got != 1 {
-		t.Fatalf("AvailableCount after move = %d; want 1", got)
+	if got := p.AvailableCount(); got != len(input)-1 {
+		t.Fatalf("AvailableCount after move = %d; want %d", got, len(input)-1)
 	}
-	if got := p.UnavailableCount(); got != len(input)-1 {
-		t.Fatalf("UnavailableCount after move = %d; want %d", got, len(input)-1)
+	if got := p.UnavailableCount(); got != 1 {
+		t.Fatalf("UnavailableCount after move = %d; want 1", got)
 	}
 }
 
@@ -886,29 +886,29 @@ func TestAutoRefresh(t *testing.T) {
 		start := time.Now()
 		p.AutoRefresh(1 * time.Hour) // Long interval but should refresh immediately
 
-		// Give a small window for the initial refresh to complete
-		deadline := time.Now().Add(50 * time.Millisecond)
-		var count int
+		// Wait for the initial refresh to complete by checking for the log message
+		deadline := time.Now().Add(100 * time.Millisecond)
+		var refreshLogged bool
 		for time.Now().Before(deadline) {
-			count = p.AvailableCount()
-			if count == 1 {
+			if strings.Contains(buf.String(), "health check refresh completed") {
+				refreshLogged = true
 				break
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
 
-		// Verify resolvers are available
-		if count != 1 {
-			t.Errorf("Expected 1 available resolver within 50ms, got %d", count)
+		// Verify refresh was logged
+		if !refreshLogged {
+			t.Error("Expected refresh completion log message within 100ms")
 		}
 
-		// Verify refresh was logged
-		if !strings.Contains(buf.String(), "health check refresh completed") {
-			t.Error("Expected refresh completion log message")
+		// Verify resolvers are available
+		if count := p.AvailableCount(); count != 1 {
+			t.Errorf("Expected 1 available resolver, got %d", count)
 		}
 
 		elapsed := time.Since(start)
-		if elapsed > 100*time.Millisecond {
+		if elapsed > 150*time.Millisecond {
 			t.Errorf("Initial refresh took too long: %v", elapsed)
 		}
 

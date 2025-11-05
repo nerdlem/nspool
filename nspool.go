@@ -19,10 +19,11 @@ package nspool
 //   - providing concurrency-safe operations for selection and configuration.
 //
 // Usage overview:
-//   1. Construct a Pool via the package constructor.
+//   1. Construct a Pool via the package constructor. All resolvers start as available.
 //   2. Configure health check behaviour (label generator, suffixes, timeouts,
 //      check interval, worker pool size) and logging as needed.
-//   3. Usually, start background health checking.
+//   3. Optionally call Refresh() to validate resolver health, or start background
+//      health checking with AutoRefresh().
 //   4. Use Pool methods to select resolvers and perform queries, relying on
 //      the pool's retry and selection semantics.
 //
@@ -193,9 +194,8 @@ func DefaultRefreshPostHook(p *Pool) {
 }
 
 // NewFromPoolSlice returns a newly configured Pool primed with the resolvers
-// explicitly provided in the call. All resolvers are initially marked as unavailable.
-// Use Refresh() or launch AutoRefresh() to have resolvers checked and marked as
-// available.
+// explicitly provided in the call. All resolvers are initially marked as available.
+// Use Refresh() to validate resolver health if needed.
 func NewFromPoolSlice(res []string) *Pool {
 	np := Pool{
 		Client:                new(dns.Client),
@@ -209,7 +209,7 @@ func NewFromPoolSlice(res []string) *Pool {
 		minResolvers:          1,
 		queryTimeout:          10 * time.Second,
 		resolvers:             FileArray(res),
-		unavailableResolvers:  append([]string{}, res...),
+		availableResolvers:    append([]string{}, res...),
 	}
 	return &np
 }
@@ -217,9 +217,8 @@ func NewFromPoolSlice(res []string) *Pool {
 // NewFromViper returns a newly configured Pool primed with the resolvers
 // from viper using the provided tag. If the value in viper starts with '@',
 // it will be treated as a file reference and the resolvers will be read from
-// that file. All resolvers are initially marked as unavailable.
-// Use Refresh() or launch AutoRefresh() to have resolvers checked and marked as
-// available.
+// that file. All resolvers are initially marked as available.
+// Use Refresh() to validate resolver health if needed.
 func NewFromViper(tag string) *Pool {
 	var resolvers FileArray
 	err := viper.UnmarshalKey(tag, &resolvers)
@@ -239,7 +238,7 @@ func NewFromViper(tag string) *Pool {
 		minResolvers:          1,
 		queryTimeout:          10 * time.Second,
 		resolvers:             resolvers,
-		unavailableResolvers:  append([]string{}, resolvers.StringSlice()...),
+		availableResolvers:    append([]string{}, resolvers.StringSlice()...),
 		viperResolversTag:     tag,
 	}
 	return &np

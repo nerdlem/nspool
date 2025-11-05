@@ -26,14 +26,14 @@ go get github.com/nerdlem/nspool/v2
 ```go
 import "github.com/nerdlem/nspool/v2"
 
-// Create pool with resolver addresses
+// Create pool with resolver addresses (resolvers start as available)
 nsp := nspool.NewFromPoolSlice([]string{"1.1.1.1:53", "8.8.8.8:53"})
 
 // Configure health checking
 nsp.SetHealthDomainSuffix("example.com")
 nsp.SetMinResolvers(1)
 
-// Perform initial health check
+// Optionally perform health check to validate resolvers
 if err := nsp.Refresh(); err != nil {
     log.Fatal(err)
 }
