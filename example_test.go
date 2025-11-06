@@ -67,7 +67,7 @@ func ExamplePool_SetHealthCheckFunction() {
 	nsp.SetHealthDomainSuffix("example.com")
 
 	// Custom health check that validates response content
-	customCheck := func(ans dns.Msg, t time.Duration, p *nspool.Pool) bool {
+	customCheck := func(ans dns.Msg, t time.Duration, resolver string, p *nspool.Pool) bool {
 		// Must respond within 2 seconds
 		if t > 2*time.Second {
 			return false

@@ -1733,7 +1733,7 @@ func TestHealthCheckFunctionAccessors(t *testing.T) {
 
 	t.Run("set nil restores default", func(t *testing.T) {
 		p := NewFromPoolSlice([]string{"1.1.1.1:53"})
-		custom := func(ans dns.Msg, t time.Duration, p *Pool) bool { return true }
+		custom := func(ans dns.Msg, t time.Duration, resolver string, p *Pool) bool { return true }
 		p.SetHealthCheckFunction(custom)
 		p.SetHealthCheckFunction(nil) // Should restore default
 
@@ -1750,7 +1750,7 @@ func TestHealthCheckFunctionAccessors(t *testing.T) {
 		p.Client = newMockClient(true, 10*time.Millisecond)
 
 		customCalled := false
-		custom := func(ans dns.Msg, t time.Duration, pool *Pool) bool {
+		custom := func(ans dns.Msg, t time.Duration, resolver string, pool *Pool) bool {
 			customCalled = true
 			return true
 		}
@@ -1776,8 +1776,8 @@ func TestHealthCheckFunctionAccessors(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(workers)
 
-		custom1 := func(ans dns.Msg, t time.Duration, p *Pool) bool { return true }
-		custom2 := func(ans dns.Msg, t time.Duration, p *Pool) bool { return false }
+		custom1 := func(ans dns.Msg, t time.Duration, resolver string, p *Pool) bool { return true }
+		custom2 := func(ans dns.Msg, t time.Duration, resolver string, p *Pool) bool { return false }
 
 		for i := 0; i < workers; i++ {
 			go func(n int) {
@@ -1869,7 +1869,7 @@ func TestDefaultHealthCheckFunction(t *testing.T) {
 		msg := dns.Msg{}
 		msg.Rcode = dns.RcodeSuccess
 		// p may be nil for success path because function only references p on failure.
-		ok := DefaultHealthCheckFunction(msg, 10*time.Millisecond, nil)
+		ok := DefaultHealthCheckFunction(msg, 10*time.Millisecond, "1.1.1.1:53", nil)
 		if !ok {
 			t.Fatalf("expected true for success rcode")
 		}
@@ -1886,7 +1886,7 @@ func TestDefaultHealthCheckFunction(t *testing.T) {
 		p.logger = nil
 		p.mu.Unlock()
 
-		ok := DefaultHealthCheckFunction(msg, 1*time.Second, p)
+		ok := DefaultHealthCheckFunction(msg, 1*time.Second, "8.8.4.4:53", p)
 		if ok {
 			t.Fatalf("expected false for non-success")
 		}
@@ -1909,7 +1909,7 @@ func TestDefaultHealthCheckFunction(t *testing.T) {
 		p.logger = logger
 		p.mu.Unlock()
 
-		ok := DefaultHealthCheckFunction(msg, 2*time.Millisecond, p)
+		ok := DefaultHealthCheckFunction(msg, 2*time.Millisecond, "1.1.1.1:53", p)
 		if ok {
 			t.Fatalf("expected false for non-success with logger")
 		}
@@ -1939,7 +1939,7 @@ func TestDefaultHealthCheckFunction(t *testing.T) {
 		p.logger = logger
 		p.mu.Unlock()
 
-		ok := DefaultHealthCheckFunction(msg, 3*time.Millisecond, p)
+		ok := DefaultHealthCheckFunction(msg, 3*time.Millisecond, "1.1.1.1:53", p)
 		if ok {
 			t.Fatalf("expected false for unknown rcode")
 		}

@@ -70,11 +70,10 @@ type HealthLabelGenerator func() string
 
 // HealthCheckFunction is the signature for the function that powers resolver health
 // check. It receives the DNS response to the health check query, the time it took
-// to get the answer and a pointer to the nspool that is running the health check.
-// It must return true to indicate a healthy, usable resolver. False marks the
-//
-//	resolver as unavailable for use.
-type HealthCheckFunction func(dns.Msg, time.Duration, *Pool) bool
+// to get the answer, the resolver address being checked, and a pointer to the nspool
+// that is running the health check. It must return true to indicate a healthy,
+// usable resolver. False marks the resolver as unavailable for use.
+type HealthCheckFunction func(ans dns.Msg, elapsed time.Duration, resolver string, p *Pool) bool
 
 // RefreshPreHook is the signature for a function called before Refresh() starts.
 // It receives a pointer to the Pool being refreshed and must return a boolean.
@@ -146,8 +145,9 @@ func DefaultHealthLabelGenerator() string {
 
 // DefaultHealthCheckFunction provides default health check behaviour, which simply
 // verifies tha the response indicated success. If the debug attribute is enabled
-// and a logger has been provided, it will log data about the response.
-func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, p *Pool) bool {
+// and a logger has been provided, it will log data about the response including
+// the resolver that was checked.
+func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, resolver string, p *Pool) bool {
 	if ans.Rcode != dns.RcodeSuccess {
 		if p.debug && p.logger != nil {
 			rcode, ok := dns.RcodeToString[ans.Rcode]
@@ -155,11 +155,12 @@ func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, p *Pool) bool {
 				rcode = fmt.Sprintf("%d", ans.Rcode)
 			}
 			p.logger.WithFields(logrus.Fields{
-				"query": ans.Question[0].Name,
-				"class": ans.Question[0].Qclass,
-				"type":  ans.Question[0].Qtype,
-				"rcode": rcode,
-				"time":  t.String(),
+				"resolver": resolver,
+				"query":    ans.Question[0].Name,
+				"class":    ans.Question[0].Qclass,
+				"type":     ans.Question[0].Qtype,
+				"rcode":    rcode,
+				"time":     t.String(),
 			}).Debug("😵 response was not ok")
 		}
 		return false
@@ -517,7 +518,7 @@ func (p *Pool) Refresh() error {
 				if err == nil && ans != nil {
 					// Verify the response has a valid question section matching our query
 					if len(ans.Question) > 0 && ans.Question[0].Name == name && ans.Question[0].Qtype == p.hcQType {
-						if p.hcHealthCheck(*ans, elapsed, p) {
+						if p.hcHealthCheck(*ans, elapsed, res, p) {
 							healthy = true
 							break
 						}
