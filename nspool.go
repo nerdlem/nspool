@@ -34,7 +34,9 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gammazero/workerpool"
@@ -96,6 +98,26 @@ type DnsClientLike interface {
 	ExchangeContext(context.Context, *dns.Msg, string) (*dns.Msg, time.Duration, error)
 }
 
+// ResolverMetrics tracks performance statistics for a single resolver.
+type ResolverMetrics struct {
+	total      atomic.Int64
+	failures   atomic.Int64
+	lastError  atomic.Int64 // Unix timestamp
+	lastUsed   atomic.Int64 // Unix timestamp
+	disabledAt atomic.Int64 // Unix timestamp when disabled, 0 if not disabled
+}
+
+// ResolverStats provides a snapshot of resolver metrics for reporting.
+type ResolverStats struct {
+	Resolver   string
+	Total      int64
+	Failures   int64
+	ErrorRate  float64
+	LastError  time.Time
+	LastUsed   time.Time
+	DisabledAt time.Time
+}
+
 // Pool represents a new nspool object.
 type Pool struct {
 	availableResolvers    []string
@@ -115,17 +137,22 @@ type Pool struct {
 	mu                    sync.Mutex
 	muRefresh             sync.Mutex
 	queryTimeout          time.Duration
-	refreshInProgress     bool
-	refreshProcessed      int
-	refreshHealthy        int
-	refreshUnhealthy      int
-	refreshTotal          int
-	refreshPreHook        RefreshPreHook
-	refreshPostHook       RefreshPostHook
-	resolvers             FileArray
-	signalHandlerChan     *chan bool
-	unavailableResolvers  []string
-	viperResolversTag     string
+	refreshInProgress      bool
+	refreshProcessed       int
+	refreshHealthy         int
+	refreshUnhealthy       int
+	refreshTotal           int
+	refreshPreHook         RefreshPreHook
+	refreshPostHook        RefreshPostHook
+	resolvers              FileArray
+	resolverStats          map[string]*ResolverMetrics
+	resolverStatsMu        sync.RWMutex
+	resolverErrorThresh    float64
+	resolverDisableThresh  float64
+	resolverCooldownPeriod time.Duration
+	signalHandlerChan      *chan bool
+	unavailableResolvers   []string
+	viperResolversTag      string
 	// Client is a pointer to the dns.Client that will be used for sending all queries.
 	// This value is automatically set by the constructors to a vainilla dns.Client
 	// object. It is exposed to allow the caller to further customize behavior.
@@ -228,18 +255,22 @@ func DefaultRefreshPostHook(p *Pool) {
 // Use Refresh() to validate resolver health if needed.
 func NewFromPoolSlice(res []string) *Pool {
 	np := Pool{
-		Client:                new(dns.Client),
-		hcAutoRefreshInterval: 0 * time.Second,
-		hcNameGenerator:       DefaultHealthLabelGenerator,
-		hcHealthCheck:         DefaultHealthCheckFunction,
-		hcQType:               dns.TypeA,
-		hcResolverTimeout:     10 * time.Second,
-		hcWpSize:              64,
-		maxQueryRetries:       3,
-		minResolvers:          1,
-		queryTimeout:          10 * time.Second,
-		resolvers:             FileArray(res),
-		availableResolvers:    append([]string{}, res...),
+		Client:                 new(dns.Client),
+		hcAutoRefreshInterval:  0 * time.Second,
+		hcNameGenerator:        DefaultHealthLabelGenerator,
+		hcHealthCheck:          DefaultHealthCheckFunction,
+		hcQType:                dns.TypeA,
+		hcResolverTimeout:      10 * time.Second,
+		hcWpSize:               64,
+		maxQueryRetries:        3,
+		minResolvers:           1,
+		queryTimeout:           10 * time.Second,
+		resolvers:              FileArray(res),
+		availableResolvers:     append([]string{}, res...),
+		resolverStats:          make(map[string]*ResolverMetrics),
+		resolverErrorThresh:    0.05,  // 5% default
+		resolverDisableThresh:  0.20,  // 20% default
+		resolverCooldownPeriod: 1 * time.Hour,
 	}
 	return &np
 }
@@ -257,19 +288,23 @@ func NewFromViper(tag string) *Pool {
 	}
 
 	np := Pool{
-		Client:                new(dns.Client),
-		hcAutoRefreshInterval: 0 * time.Second,
-		hcNameGenerator:       DefaultHealthLabelGenerator,
-		hcHealthCheck:         DefaultHealthCheckFunction,
-		hcQType:               dns.TypeA,
-		hcResolverTimeout:     10 * time.Second,
-		hcWpSize:              64,
-		maxQueryRetries:       3,
-		minResolvers:          1,
-		queryTimeout:          10 * time.Second,
-		resolvers:             resolvers,
-		availableResolvers:    append([]string{}, resolvers.StringSlice()...),
-		viperResolversTag:     tag,
+		Client:                 new(dns.Client),
+		hcAutoRefreshInterval:  0 * time.Second,
+		hcNameGenerator:        DefaultHealthLabelGenerator,
+		hcHealthCheck:          DefaultHealthCheckFunction,
+		hcQType:                dns.TypeA,
+		hcResolverTimeout:      10 * time.Second,
+		hcWpSize:               64,
+		maxQueryRetries:        3,
+		minResolvers:           1,
+		queryTimeout:           10 * time.Second,
+		resolvers:              resolvers,
+		availableResolvers:     append([]string{}, resolvers.StringSlice()...),
+		viperResolversTag:      tag,
+		resolverStats:          make(map[string]*ResolverMetrics),
+		resolverErrorThresh:    0.05,  // 5% default
+		resolverDisableThresh:  0.20,  // 20% default
+		resolverCooldownPeriod: 1 * time.Hour,
 	}
 	return &np
 }
@@ -867,6 +902,86 @@ func (p *Pool) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, time.
 	return nil, time.Since(start), fmt.Errorf("all resolvers failed after %d attempts: %v", p.maxQueryRetries+1, lastErr)
 }
 
+// ExchangeWeighted performs a DNS query using a weighted randomly selected resolver
+// from the pool. It will retry the query up to maxQueryRetries times if a resolver
+// fails to respond. Resolver selection is weighted based on error rates, with
+// poorly-performing resolvers being less likely to be selected.
+// Returns the DNS response, elapsed time, and any error encountered.
+func (p *Pool) ExchangeWeighted(m *dns.Msg) (*dns.Msg, time.Duration, error) {
+	if p == nil {
+		return nil, 0, ErrNilPool
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), p.queryTimeout)
+	defer cancel()
+
+	return p.ExchangeWeightedContext(ctx, m)
+}
+
+// ExchangeWeightedContext performs a DNS query using a weighted randomly selected
+// resolver from the pool. It will retry the query up to maxQueryRetries times if
+// a resolver fails to respond. The context controls the overall timeout for all
+// retry attempts. Resolver selection is weighted based on error rates, and query
+// results are automatically recorded for performance tracking.
+// Returns the DNS response, elapsed time, and any error encountered.
+func (p *Pool) ExchangeWeightedContext(ctx context.Context, m *dns.Msg) (*dns.Msg, time.Duration, error) {
+	if p == nil {
+		return nil, 0, ErrNilPool
+	}
+	if p.Client == nil {
+		return nil, 0, ErrNilDnsClient
+	}
+
+	start := time.Now()
+	var lastErr error
+	var lastResolver string
+
+	for attempt := 0; attempt <= p.maxQueryRetries; attempt++ {
+		// Check context before each attempt
+		if err := ctx.Err(); err != nil {
+			return nil, time.Since(start), err
+		}
+
+		// Get a weighted random resolver
+		resolver, err := p.GetRandomResolverWeighted()
+		if err != nil {
+			return nil, time.Since(start), err
+		}
+
+		// Remember the current resolver for error reporting
+		lastResolver = resolver
+
+		// Try the query
+		ans, rtt, err := p.Client.ExchangeContext(ctx, m, resolver)
+		
+		// Record the query result for performance tracking
+		success := err == nil && ans != nil && ans.Rcode == dns.RcodeSuccess
+		p.RecordResolverQuery(resolver, success)
+		
+		if err == nil && ans != nil {
+			return ans, rtt, nil
+		}
+
+		lastErr = err
+
+		// Small backoff between retries, but respect context
+		select {
+		case <-ctx.Done():
+			return nil, time.Since(start), ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Log the final failure if we have a logger
+	if p.logger != nil && p.debug {
+		p.logger.WithFields(logrus.Fields{
+			"resolver": lastResolver,
+		}).Debug("querying resolver failed")
+	}
+
+	return nil, time.Since(start), fmt.Errorf("all resolvers failed after %d attempts: %v", p.maxQueryRetries+1, lastErr)
+}
+
 // GetRandomResolver returns a randomly selected resolver from the pool of available
 // resolvers. It returns an error if the number of available resolvers is less than
 // the minimum required threshold. The returned resolver address will have `:53`
@@ -967,6 +1082,282 @@ func (p *Pool) AutoRefresh(t time.Duration) {
 	}()
 }
 
+// SetResolverErrorThreshold sets the error rate threshold at which a resolver's
+// weight begins to be reduced. Set to 0 to disable this behavior.
+// Default is 0.05 (5%).
+func (p *Pool) SetResolverErrorThreshold(threshold float64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolverErrorThresh = threshold
+}
+
+// SetResolverDisableThreshold sets the error rate threshold at which a resolver
+// is completely disabled. Set to 0 to disable this behavior.
+// Default is 0.20 (20%).
+func (p *Pool) SetResolverDisableThreshold(threshold float64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolverDisableThresh = threshold
+}
+
+// SetResolverCooldownPeriod sets the time period after which a disabled resolver
+// can be re-enabled. Set to 0 to disable cooldown (resolvers stay disabled).
+// Default is 1 hour.
+func (p *Pool) SetResolverCooldownPeriod(period time.Duration) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolverCooldownPeriod = period
+}
+
+// RecordResolverQuery records the result of a query to a specific resolver.
+// This is used to track resolver performance and automatically disable
+// poorly performing resolvers based on configured thresholds.
+func (p *Pool) RecordResolverQuery(resolver string, success bool) {
+	if p == nil {
+		return
+	}
+
+	p.resolverStatsMu.RLock()
+	metrics, exists := p.resolverStats[resolver]
+	p.resolverStatsMu.RUnlock()
+
+	if !exists {
+		p.resolverStatsMu.Lock()
+		// Check again after acquiring write lock
+		if metrics, exists = p.resolverStats[resolver]; !exists {
+			metrics = &ResolverMetrics{}
+			p.resolverStats[resolver] = metrics
+		}
+		p.resolverStatsMu.Unlock()
+	}
+
+	// Get previous state
+	prevTotal := metrics.total.Load()
+	prevFailures := metrics.failures.Load()
+	prevErrorRate := 0.0
+	if prevTotal > 0 {
+		prevErrorRate = float64(prevFailures) / float64(prevTotal)
+	}
+	wasDisabled := metrics.disabledAt.Load() > 0
+
+	// Update stats
+	metrics.total.Add(1)
+	metrics.lastUsed.Store(time.Now().Unix())
+	if !success {
+		metrics.failures.Add(1)
+		metrics.lastError.Store(time.Now().Unix())
+	}
+
+	// Calculate new error rate
+	newTotal := metrics.total.Load()
+	newFailures := metrics.failures.Load()
+	newErrorRate := float64(newFailures) / float64(newTotal)
+
+	// Get thresholds
+	p.mu.Lock()
+	errorThresh := p.resolverErrorThresh
+	disableThresh := p.resolverDisableThresh
+	logger := p.logger
+	p.mu.Unlock()
+
+	// Check for state changes and log them
+	if logger != nil && newTotal > 10 { // Only log after sufficient samples
+		// Check if resolver just crossed error threshold (demotion)
+		if errorThresh > 0 && prevErrorRate < errorThresh && newErrorRate >= errorThresh {
+			logger.WithFields(logrus.Fields{
+				"resolver":   resolver,
+				"error_rate": fmt.Sprintf("%.2f%%", newErrorRate*100),
+				"total":      newTotal,
+				"failures":   newFailures,
+			}).Info("⚠️  resolver demoted: weight reduced")
+		}
+
+		// Check if resolver should be disabled (suspension)
+		if disableThresh > 0 && !wasDisabled && newErrorRate >= disableThresh {
+			metrics.disabledAt.Store(time.Now().Unix())
+			logger.WithFields(logrus.Fields{
+				"resolver":   resolver,
+				"error_rate": fmt.Sprintf("%.2f%%", newErrorRate*100),
+				"total":      newTotal,
+				"failures":   newFailures,
+			}).Info("🚫 resolver suspended: error threshold exceeded")
+		}
+	}
+}
+
+// GetResolverStats returns performance statistics for all resolvers that have
+// served at least one query.
+func (p *Pool) GetResolverStats() []ResolverStats {
+	if p == nil {
+		return nil
+	}
+
+	p.resolverStatsMu.RLock()
+	defer p.resolverStatsMu.RUnlock()
+
+	stats := make([]ResolverStats, 0, len(p.resolverStats))
+	for resolver, metrics := range p.resolverStats {
+		total := metrics.total.Load()
+		if total == 0 {
+			continue // Skip resolvers with no queries
+		}
+
+		failures := metrics.failures.Load()
+		errorRate := float64(failures) / float64(total)
+
+		lastErrorTS := metrics.lastError.Load()
+		lastUsedTS := metrics.lastUsed.Load()
+		disabledAtTS := metrics.disabledAt.Load()
+
+		stat := ResolverStats{
+			Resolver:  resolver,
+			Total:     total,
+			Failures:  failures,
+			ErrorRate: errorRate,
+		}
+
+		if lastErrorTS > 0 {
+			stat.LastError = time.Unix(lastErrorTS, 0)
+		}
+		if lastUsedTS > 0 {
+			stat.LastUsed = time.Unix(lastUsedTS, 0)
+		}
+		if disabledAtTS > 0 {
+			stat.DisabledAt = time.Unix(disabledAtTS, 0)
+		}
+
+		stats = append(stats, stat)
+	}
+
+	return stats
+}
+
+// GetRandomResolverWeighted returns a randomly selected resolver from the pool,
+// taking into account error rates and disabled resolvers. It respects the
+// cooldown period for re-enabling disabled resolvers.
+func (p *Pool) GetRandomResolverWeighted() (string, error) {
+	if p == nil {
+		return "", ErrNilPool
+	}
+
+	p.mu.Lock()
+	availableResolvers := p.availableResolvers
+	minResolvers := p.minResolvers
+	errorThresh := p.resolverErrorThresh
+	disableThresh := p.resolverDisableThresh
+	cooldownPeriod := p.resolverCooldownPeriod
+	p.mu.Unlock()
+
+	if len(availableResolvers) < minResolvers {
+		return "", ErrInsufficientResolvers
+	}
+
+	// If thresholds are disabled (0), use simple random selection
+	if errorThresh == 0 && disableThresh == 0 {
+		idx := rand.Intn(len(availableResolvers))
+		return AddPort(availableResolvers[idx]), nil
+	}
+
+	// Build list of enabled resolvers with their weights
+	type weightedResolver struct {
+		resolver string
+		weight   float64
+	}
+
+	now := time.Now()
+	candidates := make([]weightedResolver, 0, len(availableResolvers))
+	totalWeight := 0.0
+
+	p.resolverStatsMu.RLock()
+	for _, resolver := range availableResolvers {
+		metrics, exists := p.resolverStats[resolver]
+		if !exists {
+			// No stats yet, full weight
+			candidates = append(candidates, weightedResolver{resolver, 1.0})
+			totalWeight += 1.0
+			continue
+		}
+
+		// Check if disabled and cooldown
+		disabledAtTS := metrics.disabledAt.Load()
+		if disabledAtTS > 0 {
+			disabledAt := time.Unix(disabledAtTS, 0)
+			if cooldownPeriod == 0 || now.Sub(disabledAt) < cooldownPeriod {
+				// Still in cooldown, skip this resolver
+				continue
+			}
+			// Cooldown expired, re-enable
+			metrics.disabledAt.Store(0)
+			
+			// Log reinstatement
+			p.mu.Lock()
+			logger := p.logger
+			p.mu.Unlock()
+			
+			if logger != nil {
+				total := metrics.total.Load()
+				failures := metrics.failures.Load()
+				errorRate := float64(failures) / float64(total)
+				logger.WithFields(logrus.Fields{
+					"resolver":        resolver,
+					"error_rate":      fmt.Sprintf("%.2f%%", errorRate*100),
+					"cooldown_period": cooldownPeriod.String(),
+				}).Info("✅ resolver reinstated: cooldown period expired")
+			}
+		}
+
+		total := metrics.total.Load()
+		if total == 0 {
+			candidates = append(candidates, weightedResolver{resolver, 1.0})
+			totalWeight += 1.0
+			continue
+		}
+
+		failures := metrics.failures.Load()
+		errorRate := float64(failures) / float64(total)
+
+		// Calculate weight based on error rate
+		weight := 1.0
+		if errorThresh > 0 && errorRate >= errorThresh {
+			// Reduce weight proportionally
+			weight = 1.0 - ((errorRate - errorThresh) / (1.0 - errorThresh))
+			if weight < 0.1 {
+				weight = 0.1 // Minimum weight
+			}
+		}
+
+		candidates = append(candidates, weightedResolver{resolver, weight})
+		totalWeight += weight
+	}
+	p.resolverStatsMu.RUnlock()
+
+	if len(candidates) == 0 {
+		return "", ErrInsufficientResolvers
+	}
+
+	// Weighted random selection
+	r := rand.Float64() * totalWeight
+	cumulative := 0.0
+	for _, wr := range candidates {
+		cumulative += wr.weight
+		if r <= cumulative {
+			return AddPort(wr.resolver), nil
+		}
+	}
+
+	// Fallback (should not reach here)
+	return AddPort(candidates[len(candidates)-1].resolver), nil
+}
+
 // InstallSignalHandler sets up a signal handler that logs pool statistics when
 // the specified signal is received. The handler logs the number of total resolvers,
 // available resolvers, and unavailable resolvers. This can be useful for monitoring
@@ -1044,6 +1435,54 @@ func (p *Pool) InstallSignalHandler(sig os.Signal) {
 							"available":   available,
 							"unavailable": unavailable,
 						}).Info("📊 resolver pool statistics")
+
+						// Log resolver performance stats
+						stats := p.GetResolverStats()
+						if len(stats) > 0 {
+							// Sort by error rate descending for worst performers
+							sort.Slice(stats, func(i, j int) bool {
+								return stats[i].ErrorRate > stats[j].ErrorRate
+							})
+
+							// Top 10 worst performers
+							worst := stats
+							if len(worst) > 10 {
+								worst = worst[:10]
+							}
+
+							for _, stat := range worst {
+								fields := logrus.Fields{
+									"resolver":   stat.Resolver,
+									"total":      stat.Total,
+									"failures":   stat.Failures,
+									"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
+								}
+								if !stat.DisabledAt.IsZero() {
+									fields["disabled"] = true
+								}
+								p.logger.WithFields(fields).Info("💩 worst resolver")
+							}
+
+							// Sort by error rate ascending for best performers
+							sort.Slice(stats, func(i, j int) bool {
+								return stats[i].ErrorRate < stats[j].ErrorRate
+							})
+
+							// Top 10 best performers
+							best := stats
+							if len(best) > 10 {
+								best = best[:10]
+							}
+
+							for _, stat := range best {
+								p.logger.WithFields(logrus.Fields{
+									"resolver":   stat.Resolver,
+									"total":      stat.Total,
+									"failures":   stat.Failures,
+									"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
+								}).Info("✅ best resolver")
+							}
+						}
 					}
 				}
 			}
