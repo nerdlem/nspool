@@ -115,6 +115,11 @@ type Pool struct {
 	mu                    sync.Mutex
 	muRefresh             sync.Mutex
 	queryTimeout          time.Duration
+	refreshInProgress     bool
+	refreshProcessed      int
+	refreshHealthy        int
+	refreshUnhealthy      int
+	refreshTotal          int
 	refreshPreHook        RefreshPreHook
 	refreshPostHook       RefreshPostHook
 	resolvers             FileArray
@@ -436,6 +441,21 @@ func (p *Pool) Refresh() error {
 	p.muRefresh.Lock()
 	defer p.muRefresh.Unlock()
 
+	// Initialize progress tracking
+	p.mu.Lock()
+	p.refreshInProgress = true
+	p.refreshProcessed = 0
+	p.refreshHealthy = 0
+	p.refreshUnhealthy = 0
+	p.refreshTotal = len(p.resolvers)
+	p.mu.Unlock()
+
+	defer func() {
+		p.mu.Lock()
+		p.refreshInProgress = false
+		p.mu.Unlock()
+	}()
+
 	// Call pre-hook if set
 	if p.refreshPreHook != nil {
 		if !p.refreshPreHook(p) {
@@ -553,6 +573,16 @@ func (p *Pool) Refresh() error {
 					}
 				}
 			}
+
+			// Update progress counters
+			p.mu.Lock()
+			p.refreshProcessed++
+			if healthy {
+				p.refreshHealthy++
+			} else {
+				p.refreshUnhealthy++
+			}
+			p.mu.Unlock()
 
 			results <- result{resolver: res, healthy: healthy}
 		}
@@ -973,17 +1003,40 @@ func (p *Pool) InstallSignalHandler(sig os.Signal) {
 				return
 			case <-sigChan:
 				p.mu.Lock()
-				total := len(p.resolvers)
-				available := len(p.availableResolvers)
-				unavailable := len(p.unavailableResolvers)
-				p.mu.Unlock()
+				inProgress := p.refreshInProgress
+				if inProgress {
+					// Show refresh progress
+					processed := p.refreshProcessed
+					healthy := p.refreshHealthy
+					unhealthy := p.refreshUnhealthy
+					total := p.refreshTotal
+					pending := total - processed
+					p.mu.Unlock()
 
-				if p.logger != nil {
-					p.logger.WithFields(logrus.Fields{
-						"total":       total,
-						"available":   available,
-						"unavailable": unavailable,
-					}).Info("📊 resolver pool statistics")
+					if p.logger != nil {
+						p.logger.WithFields(logrus.Fields{
+							"total":     total,
+							"processed": processed,
+							"pending":   pending,
+							"healthy":   healthy,
+							"unhealthy": unhealthy,
+							"progress":  fmt.Sprintf("%.1f%%", float64(processed)*100.0/float64(total)),
+						}).Info("🔄 refresh progress")
+					}
+				} else {
+					// Show current pool statistics
+					total := len(p.resolvers)
+					available := len(p.availableResolvers)
+					unavailable := len(p.unavailableResolvers)
+					p.mu.Unlock()
+
+					if p.logger != nil {
+						p.logger.WithFields(logrus.Fields{
+							"total":       total,
+							"available":   available,
+							"unavailable": unavailable,
+						}).Info("📊 resolver pool statistics")
+					}
 				}
 			}
 		}
