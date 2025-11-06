@@ -173,10 +173,13 @@ func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, resolver string, p
 	return true
 }
 
-// addPort ensures a resolver address has a port. If no port is present,
+// AddPort ensures a resolver address has a port. If no port is present,
 // it appends the default DNS port :53. This handles both IPv4 and most
 // IPv6 cases using a naive colon check from the end of the string.
-func addPort(addr string) string {
+//
+// This function is useful when working with resolver addresses that may
+// or may not include port numbers.
+func AddPort(addr string) string {
 	// naive check: if contains colon assume port present (covers IPv6 too in most cases)
 	for i := len(addr) - 1; i >= 0; i-- {
 		if addr[i] == ':' {
@@ -184,6 +187,11 @@ func addPort(addr string) string {
 		}
 	}
 	return addr + ":53"
+}
+
+// addPort is a convenience wrapper for AddPort for internal use
+func addPort(addr string) string {
+	return AddPort(addr)
 }
 
 // DefaultRefreshPreHook is the default pre-refresh hook that always allows
