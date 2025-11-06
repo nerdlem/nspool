@@ -1430,14 +1430,34 @@ func (p *Pool) InstallSignalHandler(sig os.Signal) {
 					p.mu.Unlock()
 
 					if p.logger != nil {
+						// Calculate resolver status counts
+						stats := p.GetResolverStats()
+						var suspended, demoted, healthy int64
+						
+						p.mu.Lock()
+						errorThresh := p.resolverErrorThresh
+						p.mu.Unlock()
+						
+						for _, stat := range stats {
+							if !stat.DisabledAt.IsZero() {
+								suspended++
+							} else if errorThresh > 0 && stat.ErrorRate >= errorThresh {
+								demoted++
+							} else {
+								healthy++
+							}
+						}
+
 						p.logger.WithFields(logrus.Fields{
 							"total":       total,
 							"available":   available,
 							"unavailable": unavailable,
+							"suspended":   suspended,
+							"demoted":     demoted,
+							"healthy":     healthy,
 						}).Info("📊 resolver pool statistics")
 
 						// Log resolver performance stats
-						stats := p.GetResolverStats()
 						if len(stats) > 0 {
 							// Sort by error rate descending for worst performers
 							sort.Slice(stats, func(i, j int) bool {
