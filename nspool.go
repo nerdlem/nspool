@@ -168,6 +168,19 @@ func DefaultHealthCheckFunction(ans dns.Msg, t time.Duration, resolver string, p
 	return true
 }
 
+// addPort ensures a resolver address has a port. If no port is present,
+// it appends the default DNS port :53. This handles both IPv4 and most
+// IPv6 cases using a naive colon check from the end of the string.
+func addPort(addr string) string {
+	// naive check: if contains colon assume port present (covers IPv6 too in most cases)
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			return addr
+		}
+	}
+	return addr + ":53"
+}
+
 // DefaultRefreshPreHook is the default pre-refresh hook that always allows
 // the refresh to proceed. This function serves as an example and documentation
 // for implementing custom pre-refresh hooks.
@@ -478,17 +491,6 @@ func (p *Pool) Refresh() error {
 	}
 
 	results := make(chan result, len(p.resolvers))
-
-	// helper to ensure resolver has a port
-	addPort := func(addr string) string {
-		// naive check: if contains colon assume port present (covers IPv6 too in most cases)
-		for i := len(addr) - 1; i >= 0; i-- {
-			if addr[i] == ':' {
-				return addr
-			}
-		}
-		return addr + ":53"
-	}
 
 	// use workerpool for concurrency
 	pool := workerpool.New(wp)
@@ -845,15 +847,8 @@ func (p *Pool) GetRandomResolver() (string, error) {
 
 	idx := rand.Intn(len(p.availableResolvers))
 	resolver := p.availableResolvers[idx]
-	
-	// Ensure resolver has a port
-	// naive check: if contains colon assume port present (covers IPv6 too in most cases)
-	for i := len(resolver) - 1; i >= 0; i-- {
-		if resolver[i] == ':' {
-			return resolver, nil
-		}
-	}
-	return resolver + ":53", nil
+
+	return addPort(resolver), nil
 }
 
 // AutoRefresh enables automatic refresh of resolver health checks at the interval
