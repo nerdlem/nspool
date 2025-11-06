@@ -32,6 +32,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"os/signal"
 	"sync"
 	"time"
 
@@ -117,6 +119,7 @@ type Pool struct {
 	refreshPreHook        RefreshPreHook
 	refreshPostHook       RefreshPostHook
 	resolvers             FileArray
+	signalHandlerChan     *chan bool
 	unavailableResolvers  []string
 	viperResolversTag     string
 	// Client is a pointer to the dns.Client that will be used for sending all queries.
@@ -928,4 +931,83 @@ func (p *Pool) AutoRefresh(t time.Duration) {
 			}
 		}
 	}()
+}
+
+// InstallSignalHandler sets up a signal handler that logs pool statistics when
+// the specified signal is received. The handler logs the number of total resolvers,
+// available resolvers, and unavailable resolvers. This can be useful for monitoring
+// pool health during long-running operations.
+//
+// Only one signal handler can be installed at a time. Multiple calls will replace
+// the existing handler with a new one for the specified signal. The signal handler
+// runs in a goroutine until StopSignalHandler() is called or the Pool is garbage
+// collected.
+//
+// Example:
+//
+//	pool.InstallSignalHandler(syscall.SIGUSR1)
+//
+// On Unix systems, you can send the signal with: kill -USR1 <pid>
+func (p *Pool) InstallSignalHandler(sig os.Signal) {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Stop existing signal handler if any
+	if p.signalHandlerChan != nil {
+		close(*p.signalHandlerChan)
+		p.signalHandlerChan = nil
+	}
+
+	// Create new stop channel for this signal handler instance
+	stop := make(chan bool)
+	p.signalHandlerChan = &stop
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, sig)
+
+	go func() {
+		defer signal.Stop(sigChan)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-sigChan:
+				p.mu.Lock()
+				total := len(p.resolvers)
+				available := len(p.availableResolvers)
+				unavailable := len(p.unavailableResolvers)
+				p.mu.Unlock()
+
+				if p.logger != nil {
+					p.logger.WithFields(logrus.Fields{
+						"total":       total,
+						"available":   available,
+						"unavailable": unavailable,
+					}).Info("📊 resolver pool statistics")
+				}
+			}
+		}
+	}()
+}
+
+// StopSignalHandler stops the currently running signal handler goroutine if one
+// is active. If no signal handler is running, this method does nothing.
+// This is useful for cleaning up resources when the signal handler is no longer
+// needed, or before installing a new handler.
+func (p *Pool) StopSignalHandler() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.signalHandlerChan != nil {
+		close(*p.signalHandlerChan)
+		p.signalHandlerChan = nil
+	}
 }
