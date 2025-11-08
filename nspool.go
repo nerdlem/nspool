@@ -48,8 +48,8 @@ import (
 var (
 	// ErrNilPool is returned when methods are invoked against a nil Pool.
 	ErrNilPool = fmt.Errorf("nil pool")
-	// ErrNilDnsClient is returned when the internal DNS Client is nil.
-	ErrNilDnsClient = fmt.Errorf("nil dns client")
+	// ErrNilDNSClient is returned when the internal DNS Client is nil.
+	ErrNilDNSClient = fmt.Errorf("nil dns client")
 	// ErrNoHcSuffix is returned whenever a health check is required and
 	// there is no HealthDomainSuffix() set.
 	ErrNoHcSuffix = fmt.Errorf("health check domain suffix not set")
@@ -91,9 +91,9 @@ type RefreshPreHook func(*Pool) bool
 // on the refresh outcome.
 type RefreshPostHook func(*Pool)
 
-// DnsClientLike is an interface that should accept dns.Client. This is used to
+// DNSClientLike is an interface that should accept dns.Client. This is used to
 // facilitate testing and allowing easier overriding to support special use cases.
-type DnsClientLike interface {
+type DNSClientLike interface {
 	Exchange(*dns.Msg, string) (*dns.Msg, time.Duration, error)
 	ExchangeContext(context.Context, *dns.Msg, string) (*dns.Msg, time.Duration, error)
 }
@@ -120,23 +120,23 @@ type ResolverStats struct {
 
 // Pool represents a new nspool object.
 type Pool struct {
-	availableResolvers    []string
-	debug                 bool
-	hcAutoRefreshChan     *chan bool
-	hcAutoRefreshInterval time.Duration
-	hcDomainSuffix        string
-	hcNameGenerator       HealthLabelGenerator
-	hcHealthCheck         HealthCheckFunction
-	hcResolverTimeout     time.Duration
-	hcQType               uint16
-	hcWpSize              int
-	lastRefreshed         time.Time
-	logger                *logrus.Logger
-	maxQueryRetries       int
-	minResolvers          int
-	mu                    sync.Mutex
-	muRefresh             sync.Mutex
-	queryTimeout          time.Duration
+	availableResolvers     []string
+	debug                  bool
+	hcAutoRefreshChan      *chan bool
+	hcAutoRefreshInterval  time.Duration
+	hcDomainSuffix         string
+	hcNameGenerator        HealthLabelGenerator
+	hcHealthCheck          HealthCheckFunction
+	hcResolverTimeout      time.Duration
+	hcQType                uint16
+	hcWpSize               int
+	lastRefreshed          time.Time
+	logger                 *logrus.Logger
+	maxQueryRetries        int
+	minResolvers           int
+	mu                     sync.Mutex
+	muRefresh              sync.Mutex
+	queryTimeout           time.Duration
 	refreshInProgress      bool
 	refreshProcessed       int
 	refreshHealthy         int
@@ -157,7 +157,7 @@ type Pool struct {
 	// This value is automatically set by the constructors to a vainilla dns.Client
 	// object. It is exposed to allow the caller to further customize behavior.
 	// Setting this value to nil will cause all operations to return an error.
-	Client DnsClientLike
+	Client DNSClientLike
 }
 
 // DefaultHealthLabelGenerator is the dafault function to generate labels used
@@ -268,8 +268,8 @@ func NewFromPoolSlice(res []string) *Pool {
 		resolvers:              FileArray(res),
 		availableResolvers:     append([]string{}, res...),
 		resolverStats:          make(map[string]*ResolverMetrics),
-		resolverErrorThresh:    0.05,  // 5% default
-		resolverDisableThresh:  0.20,  // 20% default
+		resolverErrorThresh:    0.05, // 5% default
+		resolverDisableThresh:  0.20, // 20% default
 		resolverCooldownPeriod: 1 * time.Hour,
 	}
 	return &np
@@ -302,8 +302,8 @@ func NewFromViper(tag string) *Pool {
 		availableResolvers:     append([]string{}, resolvers.StringSlice()...),
 		viperResolversTag:      tag,
 		resolverStats:          make(map[string]*ResolverMetrics),
-		resolverErrorThresh:    0.05,  // 5% default
-		resolverDisableThresh:  0.20,  // 20% default
+		resolverErrorThresh:    0.05, // 5% default
+		resolverDisableThresh:  0.20, // 20% default
 		resolverCooldownPeriod: 1 * time.Hour,
 	}
 	return &np
@@ -484,52 +484,82 @@ func (p *Pool) Refresh() error {
 	p.muRefresh.Lock()
 	defer p.muRefresh.Unlock()
 
-	// Initialize progress tracking
+	p.initRefreshProgress()
+	defer p.clearRefreshProgress()
+
+	if err := p.callRefreshPreHook(); err != nil {
+		return err
+	}
+	defer p.callRefreshPostHook()
+
+	if err := p.validateRefreshPreconditions(); err != nil {
+		return err
+	}
+
+	p.updateResolversFromViper()
+
+	if err := p.checkHealthCheckDomainSuffix(); err != nil {
+		return err
+	}
+
+	wp, retries := p.normalizeRefreshSettings()
+	healthyMap := p.performHealthChecks(wp, retries)
+	p.updateResolverLists(healthyMap)
+
+	return nil
+}
+
+func (p *Pool) initRefreshProgress() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.refreshInProgress = true
 	p.refreshProcessed = 0
 	p.refreshHealthy = 0
 	p.refreshUnhealthy = 0
 	p.refreshTotal = len(p.resolvers)
-	p.mu.Unlock()
+}
 
-	defer func() {
-		p.mu.Lock()
-		p.refreshInProgress = false
-		p.mu.Unlock()
-	}()
+func (p *Pool) clearRefreshProgress() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshInProgress = false
+}
 
-	// Call pre-hook if set
+func (p *Pool) callRefreshPreHook() error {
 	if p.refreshPreHook != nil {
 		if !p.refreshPreHook(p) {
 			return ErrRefreshAbortedByPreHook
 		}
 	}
+	return nil
+}
 
-	// Ensure post-hook is called when we return (unless aborted by pre-hook)
-	defer func() {
-		if p.refreshPostHook != nil {
-			p.refreshPostHook(p)
-		}
-	}()
-
-	if p.Client == nil {
-		return ErrNilDnsClient
+func (p *Pool) callRefreshPostHook() {
+	if p.refreshPostHook != nil {
+		p.refreshPostHook(p)
 	}
+}
 
+func (p *Pool) validateRefreshPreconditions() error {
+	if p.Client == nil {
+		return ErrNilDNSClient
+	}
 	if p.hcHealthCheck == nil {
 		return ErrNilHealthCheck
 	}
+	return nil
+}
 
-	// If pool was configured via viper, update resolvers from viper
+func (p *Pool) updateResolversFromViper() {
 	if p.viperResolversTag != "" {
 		var resolvers FileArray
 		if err := viper.UnmarshalKey(p.viperResolversTag, &resolvers); err == nil {
 			p.resolvers = resolvers
 		}
 	}
+}
 
-	// If no domain suffix configured, mark all resolvers unavailable and return error.
+func (p *Pool) checkHealthCheckDomainSuffix() error {
 	if p.hcDomainSuffix == "" {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -537,113 +567,126 @@ func (p *Pool) Refresh() error {
 		p.unavailableResolvers = append([]string{}, p.resolvers.StringSlice()...)
 		return ErrNoHcSuffix
 	}
+	return nil
+}
 
-	// normalize worker pool and retry settings
-	wp := p.hcWpSize
+func (p *Pool) normalizeRefreshSettings() (wp, retries int) {
+	wp = p.hcWpSize
 	if wp <= 0 {
 		wp = 1
 	}
-	retries := p.maxQueryRetries
+	retries = p.maxQueryRetries
 	if retries <= 0 {
 		retries = 1
 	}
+	return wp, retries
+}
 
+func (p *Pool) performHealthChecks(wp, retries int) map[string]bool {
 	type result struct {
 		resolver string
 		healthy  bool
 	}
 
 	results := make(chan result, len(p.resolvers))
-
-	// use workerpool for concurrency
 	pool := workerpool.New(wp)
 
 	for _, resolver := range p.resolvers {
-		res := resolver // capture loop variable
+		res := resolver
 		task := func() {
-			// generate query name once
-			label := p.hcNameGenerator()
-			name := dns.Fqdn(label + "." + p.hcDomainSuffix)
-
-			healthy := false
-			var lastErr error
-			for i := 0; i < retries; i++ {
-				// Create a new message for each attempt to avoid any potential
-				// concurrent modification issues
-				m := new(dns.Msg)
-				m.SetQuestion(name, p.hcQType)
-				m.RecursionDesired = true // Explicitly request recursion
-
-				ctx, cancel := context.WithTimeout(context.Background(), p.hcResolverTimeout)
-				start := time.Now()
-				ans, _, err := p.Client.ExchangeContext(ctx, m, addPort(res))
-				cancel()
-				elapsed := time.Since(start)
-				lastErr = err
-				if err == nil && ans != nil {
-					// Verify the response has a valid question section matching our query
-					if len(ans.Question) > 0 && ans.Question[0].Name == name && ans.Question[0].Qtype == p.hcQType {
-						if p.hcHealthCheck(*ans, elapsed, res, p) {
-							healthy = true
-							break
-						}
-					} else if p.debug && p.logger != nil {
-						p.logger.WithFields(logrus.Fields{
-							"resolver":     res,
-							"query_name":   name,
-							"query_type":   p.hcQType,
-							"has_question": len(ans.Question) > 0,
-							"answer_name": func() string {
-								if len(ans.Question) > 0 {
-									return ans.Question[0].Name
-								}
-								return "<empty>"
-							}(),
-						}).Debug("received DNS response with invalid question section")
-					}
-				} // small backoff between retries
-				time.Sleep(50 * time.Millisecond)
-			}
-
-			if p.debug && p.logger != nil {
-				if healthy {
-					p.logger.WithField("resolver", res).Debug("resolver passed health check")
-				} else {
-					if lastErr != nil {
-						p.logger.WithFields(logrus.Fields{"resolver": res, "error": lastErr}).Debug("resolver failed health check")
-					} else {
-						p.logger.WithField("resolver", res).Debug("resolver failed health check (unhealthy response)")
-					}
-				}
-			}
-
-			// Update progress counters
-			p.mu.Lock()
-			p.refreshProcessed++
-			if healthy {
-				p.refreshHealthy++
-			} else {
-				p.refreshUnhealthy++
-			}
-			p.mu.Unlock()
-
+			healthy := p.checkResolverHealth(res, retries)
+			p.updateRefreshProgress(healthy)
 			results <- result{resolver: res, healthy: healthy}
 		}
-
 		pool.Submit(task)
 	}
 
-	// wait for all submitted tasks to finish
 	pool.StopWait()
 	close(results)
 
-	// Gather results into a map for O(1) lookup
 	healthyMap := make(map[string]bool, len(p.resolvers))
 	for r := range results {
 		healthyMap[r.resolver] = r.healthy
 	}
+	return healthyMap
+}
 
-	// Build available and unavailable lists in original resolver order
+func (p *Pool) checkResolverHealth(res string, retries int) bool {
+	label := p.hcNameGenerator()
+	name := dns.Fqdn(label + "." + p.hcDomainSuffix)
+
+	healthy := false
+	var lastErr error
+	for i := 0; i < retries; i++ {
+		m := new(dns.Msg)
+		m.SetQuestion(name, p.hcQType)
+		m.RecursionDesired = true
+
+		ctx, cancel := context.WithTimeout(context.Background(), p.hcResolverTimeout)
+		start := time.Now()
+		ans, _, err := p.Client.ExchangeContext(ctx, m, addPort(res))
+		cancel()
+		elapsed := time.Since(start)
+		lastErr = err
+
+		if err == nil && ans != nil && p.isValidHealthCheckResponse(ans, name, res) {
+			if p.hcHealthCheck(*ans, elapsed, res, p) {
+				healthy = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	p.logHealthCheckResult(res, healthy, lastErr)
+	return healthy
+}
+
+func (p *Pool) isValidHealthCheckResponse(ans *dns.Msg, name, res string) bool {
+	if len(ans.Question) > 0 && ans.Question[0].Name == name && ans.Question[0].Qtype == p.hcQType {
+		return true
+	}
+	if p.debug && p.logger != nil {
+		answerName := "<empty>"
+		if len(ans.Question) > 0 {
+			answerName = ans.Question[0].Name
+		}
+		p.logger.WithFields(logrus.Fields{
+			"resolver":     res,
+			"query_name":   name,
+			"query_type":   p.hcQType,
+			"has_question": len(ans.Question) > 0,
+			"answer_name":  answerName,
+		}).Debug("received DNS response with invalid question section")
+	}
+	return false
+}
+
+func (p *Pool) logHealthCheckResult(res string, healthy bool, lastErr error) {
+	if !p.debug || p.logger == nil {
+		return
+	}
+	if healthy {
+		p.logger.WithField("resolver", res).Debug("resolver passed health check")
+	} else if lastErr != nil {
+		p.logger.WithFields(logrus.Fields{"resolver": res, "error": lastErr}).Debug("resolver failed health check")
+	} else {
+		p.logger.WithField("resolver", res).Debug("resolver failed health check (unhealthy response)")
+	}
+}
+
+func (p *Pool) updateRefreshProgress(healthy bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshProcessed++
+	if healthy {
+		p.refreshHealthy++
+	} else {
+		p.refreshUnhealthy++
+	}
+}
+
+func (p *Pool) updateResolverLists(healthyMap map[string]bool) {
 	avail := make([]string, 0, len(p.resolvers))
 	unavail := make([]string, 0, len(p.resolvers))
 	for _, resolver := range p.resolvers {
@@ -654,7 +697,6 @@ func (p *Pool) Refresh() error {
 		}
 	}
 
-	// Update pool state while holding the lock
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -669,8 +711,6 @@ func (p *Pool) Refresh() error {
 			"when":        p.lastRefreshed.Format(time.RFC3339),
 		}).Info("health check refresh completed")
 	}
-
-	return nil
 }
 
 // RefreshNameServerTimeout sets the timeout interval to use when performing
@@ -854,7 +894,7 @@ func (p *Pool) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, time.
 		return nil, 0, ErrNilPool
 	}
 	if p.Client == nil {
-		return nil, 0, ErrNilDnsClient
+		return nil, 0, ErrNilDNSClient
 	}
 
 	start := time.Now()
@@ -929,7 +969,7 @@ func (p *Pool) ExchangeWeightedContext(ctx context.Context, m *dns.Msg) (*dns.Ms
 		return nil, 0, ErrNilPool
 	}
 	if p.Client == nil {
-		return nil, 0, ErrNilDnsClient
+		return nil, 0, ErrNilDNSClient
 	}
 
 	start := time.Now()
@@ -953,11 +993,11 @@ func (p *Pool) ExchangeWeightedContext(ctx context.Context, m *dns.Msg) (*dns.Ms
 
 		// Try the query
 		ans, rtt, err := p.Client.ExchangeContext(ctx, m, resolver)
-		
+
 		// Record the query result for performance tracking
 		success := err == nil && ans != nil && ans.Rcode == dns.RcodeSuccess
 		p.RecordResolverQuery(resolver, success)
-		
+
 		if err == nil && ans != nil {
 			return ans, rtt, nil
 		}
@@ -1261,101 +1301,117 @@ func (p *Pool) GetRandomResolverWeighted() (string, error) {
 		return "", ErrInsufficientResolvers
 	}
 
-	// If thresholds are disabled (0), use simple random selection
 	if errorThresh == 0 && disableThresh == 0 {
 		idx := rand.Intn(len(availableResolvers))
 		return AddPort(availableResolvers[idx]), nil
 	}
 
-	// Build list of enabled resolvers with their weights
-	type weightedResolver struct {
-		resolver string
-		weight   float64
-	}
-
-	now := time.Now()
-	candidates := make([]weightedResolver, 0, len(availableResolvers))
-	totalWeight := 0.0
-
-	p.resolverStatsMu.RLock()
-	for _, resolver := range availableResolvers {
-		metrics, exists := p.resolverStats[resolver]
-		if !exists {
-			// No stats yet, full weight
-			candidates = append(candidates, weightedResolver{resolver, 1.0})
-			totalWeight += 1.0
-			continue
-		}
-
-		// Check if disabled and cooldown
-		disabledAtTS := metrics.disabledAt.Load()
-		if disabledAtTS > 0 {
-			disabledAt := time.Unix(disabledAtTS, 0)
-			if cooldownPeriod == 0 || now.Sub(disabledAt) < cooldownPeriod {
-				// Still in cooldown, skip this resolver
-				continue
-			}
-			// Cooldown expired, re-enable
-			metrics.disabledAt.Store(0)
-			
-			// Log reinstatement
-			p.mu.Lock()
-			logger := p.logger
-			p.mu.Unlock()
-			
-			if logger != nil {
-				total := metrics.total.Load()
-				failures := metrics.failures.Load()
-				errorRate := float64(failures) / float64(total)
-				logger.WithFields(logrus.Fields{
-					"resolver":        resolver,
-					"error_rate":      fmt.Sprintf("%.2f%%", errorRate*100),
-					"cooldown_period": cooldownPeriod.String(),
-				}).Info("✅ resolver reinstated: cooldown period expired")
-			}
-		}
-
-		total := metrics.total.Load()
-		if total == 0 {
-			candidates = append(candidates, weightedResolver{resolver, 1.0})
-			totalWeight += 1.0
-			continue
-		}
-
-		failures := metrics.failures.Load()
-		errorRate := float64(failures) / float64(total)
-
-		// Calculate weight based on error rate
-		weight := 1.0
-		if errorThresh > 0 && errorRate >= errorThresh {
-			// Reduce weight proportionally
-			weight = 1.0 - ((errorRate - errorThresh) / (1.0 - errorThresh))
-			if weight < 0.1 {
-				weight = 0.1 // Minimum weight
-			}
-		}
-
-		candidates = append(candidates, weightedResolver{resolver, weight})
-		totalWeight += weight
-	}
-	p.resolverStatsMu.RUnlock()
+	candidates, totalWeight := p.buildWeightedCandidates(availableResolvers, errorThresh, cooldownPeriod)
 
 	if len(candidates) == 0 {
 		return "", ErrInsufficientResolvers
 	}
 
-	// Weighted random selection
+	return p.selectWeightedResolver(candidates, totalWeight), nil
+}
+
+type weightedResolver struct {
+	resolver string
+	weight   float64
+}
+
+func (p *Pool) buildWeightedCandidates(availableResolvers []string, errorThresh float64, cooldownPeriod time.Duration) ([]weightedResolver, float64) {
+	now := time.Now()
+	candidates := make([]weightedResolver, 0, len(availableResolvers))
+	totalWeight := 0.0
+
+	p.resolverStatsMu.RLock()
+	defer p.resolverStatsMu.RUnlock()
+
+	for _, resolver := range availableResolvers {
+		metrics, exists := p.resolverStats[resolver]
+		if !exists {
+			candidates = append(candidates, weightedResolver{resolver, 1.0})
+			totalWeight += 1.0
+			continue
+		}
+
+		if p.shouldSkipCooldown(metrics, now, cooldownPeriod) {
+			continue
+		}
+
+		p.checkAndReinstate(metrics, resolver, cooldownPeriod)
+
+		weight := p.calculateResolverWeight(metrics, errorThresh)
+		candidates = append(candidates, weightedResolver{resolver, weight})
+		totalWeight += weight
+	}
+
+	return candidates, totalWeight
+}
+
+func (p *Pool) shouldSkipCooldown(metrics *ResolverMetrics, now time.Time, cooldownPeriod time.Duration) bool {
+	disabledAtTS := metrics.disabledAt.Load()
+	if disabledAtTS == 0 {
+		return false
+	}
+	disabledAt := time.Unix(disabledAtTS, 0)
+	return cooldownPeriod == 0 || now.Sub(disabledAt) < cooldownPeriod
+}
+
+func (p *Pool) checkAndReinstate(metrics *ResolverMetrics, resolver string, cooldownPeriod time.Duration) {
+	disabledAtTS := metrics.disabledAt.Load()
+	if disabledAtTS == 0 {
+		return
+	}
+
+	metrics.disabledAt.Store(0)
+
+	p.mu.Lock()
+	logger := p.logger
+	p.mu.Unlock()
+
+	if logger != nil {
+		total := metrics.total.Load()
+		failures := metrics.failures.Load()
+		errorRate := float64(failures) / float64(total)
+		logger.WithFields(logrus.Fields{
+			"resolver":        resolver,
+			"error_rate":      fmt.Sprintf("%.2f%%", errorRate*100),
+			"cooldown_period": cooldownPeriod.String(),
+		}).Info("✅ resolver reinstated: cooldown period expired")
+	}
+}
+
+func (p *Pool) calculateResolverWeight(metrics *ResolverMetrics, errorThresh float64) float64 {
+	total := metrics.total.Load()
+	if total == 0 {
+		return 1.0
+	}
+
+	failures := metrics.failures.Load()
+	errorRate := float64(failures) / float64(total)
+
+	weight := 1.0
+	if errorThresh > 0 && errorRate >= errorThresh {
+		weight = 1.0 - ((errorRate - errorThresh) / (1.0 - errorThresh))
+		if weight < 0.1 {
+			weight = 0.1
+		}
+	}
+	return weight
+}
+
+func (p *Pool) selectWeightedResolver(candidates []weightedResolver, totalWeight float64) string {
 	r := rand.Float64() * totalWeight
 	cumulative := 0.0
 	for _, wr := range candidates {
 		cumulative += wr.weight
 		if r <= cumulative {
-			return AddPort(wr.resolver), nil
+			return AddPort(wr.resolver)
 		}
 	}
-
-	// Fallback (should not reach here)
-	return AddPort(candidates[len(candidates)-1].resolver), nil
+	return AddPort(candidates[len(candidates)-1].resolver)
 }
 
 // InstallSignalHandler sets up a signal handler that logs pool statistics when
@@ -1381,13 +1437,11 @@ func (p *Pool) InstallSignalHandler(sig os.Signal) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Stop existing signal handler if any
 	if p.signalHandlerChan != nil {
 		close(*p.signalHandlerChan)
 		p.signalHandlerChan = nil
 	}
 
-	// Create new stop channel for this signal handler instance
 	stop := make(chan bool)
 	p.signalHandlerChan = &stop
 
@@ -1401,113 +1455,131 @@ func (p *Pool) InstallSignalHandler(sig os.Signal) {
 			case <-stop:
 				return
 			case <-sigChan:
-				p.mu.Lock()
-				inProgress := p.refreshInProgress
-				if inProgress {
-					// Show refresh progress
-					processed := p.refreshProcessed
-					healthy := p.refreshHealthy
-					unhealthy := p.refreshUnhealthy
-					total := p.refreshTotal
-					pending := total - processed
-					p.mu.Unlock()
-
-					if p.logger != nil {
-						p.logger.WithFields(logrus.Fields{
-							"total":     total,
-							"processed": processed,
-							"pending":   pending,
-							"healthy":   healthy,
-							"unhealthy": unhealthy,
-							"progress":  fmt.Sprintf("%.1f%%", float64(processed)*100.0/float64(total)),
-						}).Info("🔄 refresh progress")
-					}
-				} else {
-					// Show current pool statistics
-					total := len(p.resolvers)
-					available := len(p.availableResolvers)
-					unavailable := len(p.unavailableResolvers)
-					p.mu.Unlock()
-
-					if p.logger != nil {
-						// Calculate resolver status counts
-						stats := p.GetResolverStats()
-						var suspended, demoted, healthy int64
-						
-						p.mu.Lock()
-						errorThresh := p.resolverErrorThresh
-						p.mu.Unlock()
-						
-						for _, stat := range stats {
-							if !stat.DisabledAt.IsZero() {
-								suspended++
-							} else if errorThresh > 0 && stat.ErrorRate >= errorThresh {
-								demoted++
-							} else {
-								healthy++
-							}
-						}
-
-						p.logger.WithFields(logrus.Fields{
-							"total":       total,
-							"available":   available,
-							"unavailable": unavailable,
-							"suspended":   suspended,
-							"demoted":     demoted,
-							"healthy":     healthy,
-						}).Info("📊 resolver pool statistics")
-
-						// Log resolver performance stats
-						if len(stats) > 0 {
-							// Sort by error rate descending for worst performers
-							sort.Slice(stats, func(i, j int) bool {
-								return stats[i].ErrorRate > stats[j].ErrorRate
-							})
-
-							// Top 10 worst performers
-							worst := stats
-							if len(worst) > 10 {
-								worst = worst[:10]
-							}
-
-							for _, stat := range worst {
-								fields := logrus.Fields{
-									"resolver":   stat.Resolver,
-									"total":      stat.Total,
-									"failures":   stat.Failures,
-									"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
-								}
-								if !stat.DisabledAt.IsZero() {
-									fields["disabled"] = true
-								}
-								p.logger.WithFields(fields).Info("💩 worst resolver")
-							}
-
-							// Sort by error rate ascending for best performers
-							sort.Slice(stats, func(i, j int) bool {
-								return stats[i].ErrorRate < stats[j].ErrorRate
-							})
-
-							// Top 10 best performers
-							best := stats
-							if len(best) > 10 {
-								best = best[:10]
-							}
-
-							for _, stat := range best {
-								p.logger.WithFields(logrus.Fields{
-									"resolver":   stat.Resolver,
-									"total":      stat.Total,
-									"failures":   stat.Failures,
-									"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
-								}).Info("✅ best resolver")
-							}
-						}
-					}
-				}
+				p.handleSignal()
 			}
 		}
 	}()
+}
+
+func (p *Pool) handleSignal() {
+	p.mu.Lock()
+	inProgress := p.refreshInProgress
+	p.mu.Unlock()
+
+	if inProgress {
+		p.logRefreshProgress()
+	} else {
+		p.logPoolStatistics()
+	}
+}
+
+func (p *Pool) logRefreshProgress() {
+	p.mu.Lock()
+	processed := p.refreshProcessed
+	healthy := p.refreshHealthy
+	unhealthy := p.refreshUnhealthy
+	total := p.refreshTotal
+	pending := total - processed
+	logger := p.logger
+	p.mu.Unlock()
+
+	if logger != nil {
+		logger.WithFields(logrus.Fields{
+			"total":     total,
+			"processed": processed,
+			"pending":   pending,
+			"healthy":   healthy,
+			"unhealthy": unhealthy,
+			"progress":  fmt.Sprintf("%.1f%%", float64(processed)*100.0/float64(total)),
+		}).Info("🔄 refresh progress")
+	}
+}
+
+func (p *Pool) logPoolStatistics() {
+	p.mu.Lock()
+	total := len(p.resolvers)
+	available := len(p.availableResolvers)
+	unavailable := len(p.unavailableResolvers)
+	logger := p.logger
+	errorThresh := p.resolverErrorThresh
+	p.mu.Unlock()
+
+	if logger == nil {
+		return
+	}
+
+	stats := p.GetResolverStats()
+	suspended, demoted, healthy := p.categorizeResolverStats(stats, errorThresh)
+
+	logger.WithFields(logrus.Fields{
+		"total":       total,
+		"available":   available,
+		"unavailable": unavailable,
+		"suspended":   suspended,
+		"demoted":     demoted,
+		"healthy":     healthy,
+	}).Info("📊 resolver pool statistics")
+
+	p.logTopPerformers(stats, logger)
+}
+
+func (p *Pool) categorizeResolverStats(stats []ResolverStats, errorThresh float64) (suspended, demoted, healthy int64) {
+	for _, stat := range stats {
+		if !stat.DisabledAt.IsZero() {
+			suspended++
+		} else if errorThresh > 0 && stat.ErrorRate >= errorThresh {
+			demoted++
+		} else {
+			healthy++
+		}
+	}
+	return suspended, demoted, healthy
+}
+
+func (p *Pool) logTopPerformers(stats []ResolverStats, logger *logrus.Logger) {
+	if len(stats) == 0 {
+		return
+	}
+
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].ErrorRate > stats[j].ErrorRate
+	})
+
+	worst := stats
+	if len(worst) > 10 {
+		worst = worst[:10]
+	}
+
+	for _, stat := range worst {
+		fields := logrus.Fields{
+			"resolver":   stat.Resolver,
+			"total":      stat.Total,
+			"failures":   stat.Failures,
+			"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
+		}
+		if !stat.DisabledAt.IsZero() {
+			fields["disabled"] = true
+		}
+		logger.WithFields(fields).Info("💩 worst resolver")
+	}
+
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].ErrorRate < stats[j].ErrorRate
+	})
+
+	best := stats
+	if len(best) > 10 {
+		best = best[:10]
+	}
+
+	for _, stat := range best {
+		logger.WithFields(logrus.Fields{
+			"resolver":   stat.Resolver,
+			"total":      stat.Total,
+			"failures":   stat.Failures,
+			"error_rate": fmt.Sprintf("%.2f%%", stat.ErrorRate*100),
+		}).Info("✅ best resolver")
+	}
 }
 
 // StopSignalHandler stops the currently running signal handler goroutine if one

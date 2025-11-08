@@ -49,7 +49,7 @@ func TestMaxQueryRetries(t *testing.T) {
 			if tt.value != 0 || tt.name == "zero value" {
 				tt.pool.SetMaxQueryRetries(tt.value)
 			}
-			
+
 			got := tt.pool.MaxQueryRetries()
 			if got != tt.expected {
 				t.Errorf("MaxQueryRetries() = %v, want %v", got, tt.expected)
@@ -69,7 +69,7 @@ func TestMaxQueryRetries(t *testing.T) {
 func TestMaxQueryRetriesThreadSafety(t *testing.T) {
 	pool := NewFromPoolSlice([]string{})
 	done := make(chan bool)
-	
+
 	// Concurrent reads
 	for i := 0; i < 10; i++ {
 		go func() {
@@ -77,7 +77,7 @@ func TestMaxQueryRetriesThreadSafety(t *testing.T) {
 			done <- true
 		}()
 	}
-	
+
 	// Concurrent writes
 	for i := 0; i < 10; i++ {
 		go func(val int) {
@@ -85,7 +85,7 @@ func TestMaxQueryRetriesThreadSafety(t *testing.T) {
 			done <- true
 		}(i)
 	}
-	
+
 	// Wait for all goroutines to finish
 	for i := 0; i < 20; i++ {
 		<-done
