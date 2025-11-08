@@ -120,39 +120,40 @@ type ResolverStats struct {
 
 // Pool represents a new nspool object.
 type Pool struct {
-	availableResolvers     []string
-	debug                  bool
-	hcAutoRefreshChan      *chan bool
-	hcAutoRefreshInterval  time.Duration
-	hcDomainSuffix         string
-	hcNameGenerator        HealthLabelGenerator
-	hcHealthCheck          HealthCheckFunction
-	hcResolverTimeout      time.Duration
-	hcQType                uint16
-	hcWpSize               int
-	lastRefreshed          time.Time
-	logger                 *logrus.Logger
-	maxQueryRetries        int
-	minResolvers           int
-	mu                     sync.Mutex
-	muRefresh              sync.Mutex
-	queryTimeout           time.Duration
-	refreshInProgress      bool
-	refreshProcessed       int
-	refreshHealthy         int
-	refreshUnhealthy       int
-	refreshTotal           int
-	refreshPreHook         RefreshPreHook
-	refreshPostHook        RefreshPostHook
-	resolvers              FileArray
-	resolverStats          map[string]*ResolverMetrics
-	resolverStatsMu        sync.RWMutex
-	resolverErrorThresh    float64
-	resolverDisableThresh  float64
-	resolverCooldownPeriod time.Duration
-	signalHandlerChan      *chan bool
-	unavailableResolvers   []string
-	viperResolversTag      string
+	availableResolvers       []string
+	debug                    bool
+	hcAutoRefreshChan        *chan bool
+	hcAutoRefreshInterval    time.Duration
+	hcDomainSuffix           string
+	hcNameGenerator          HealthLabelGenerator
+	hcHealthCheck            HealthCheckFunction
+	hcResolverTimeout        time.Duration
+	hcQType                  uint16
+	hcWpSize                 int
+	lastRefreshed            time.Time
+	logger                   *logrus.Logger
+	maxQueryRetries          int
+	minResolvers             int
+	mu                       sync.Mutex
+	muRefresh                sync.Mutex
+	queryTimeout             time.Duration
+	quietResolverStateChange bool
+	refreshInProgress        bool
+	refreshProcessed         int
+	refreshHealthy           int
+	refreshUnhealthy         int
+	refreshTotal             int
+	refreshPreHook           RefreshPreHook
+	refreshPostHook          RefreshPostHook
+	resolvers                FileArray
+	resolverStats            map[string]*ResolverMetrics
+	resolverStatsMu          sync.RWMutex
+	resolverErrorThresh      float64
+	resolverDisableThresh    float64
+	resolverCooldownPeriod   time.Duration
+	signalHandlerChan        *chan bool
+	unavailableResolvers     []string
+	viperResolversTag        string
 	// Client is a pointer to the dns.Client that will be used for sending all queries.
 	// This value is automatically set by the constructors to a vainilla dns.Client
 	// object. It is exposed to allow the caller to further customize behavior.
@@ -361,6 +362,31 @@ func (p *Pool) SetDebug(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.debug = enabled
+}
+
+// QuietResolverStateChange returns the current value of the quiet resolver state change flag.
+// When true, only suspension (removal from pool) and reinstatement (addition back to pool)
+// events are logged. Weight reduction (demotion) events are suppressed.
+func (p *Pool) QuietResolverStateChange() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.quietResolverStateChange
+}
+
+// SetQuietResolverStateChange sets the quiet resolver state change flag.
+// When set to true, only suspension and reinstatement events are logged.
+// Weight reduction (demotion) events are suppressed, reducing log verbosity
+// during normal operations while still tracking critical state changes.
+func (p *Pool) SetQuietResolverStateChange(quiet bool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.quietResolverStateChange = quiet
 }
 
 // SetLogger sets the logger to be used for debug and error messages.
@@ -1207,12 +1233,14 @@ func (p *Pool) RecordResolverQuery(resolver string, success bool) {
 	errorThresh := p.resolverErrorThresh
 	disableThresh := p.resolverDisableThresh
 	logger := p.logger
+	quietMode := p.quietResolverStateChange
 	p.mu.Unlock()
 
 	// Check for state changes and log them
 	if logger != nil && newTotal > 10 { // Only log after sufficient samples
 		// Check if resolver just crossed error threshold (demotion)
-		if errorThresh > 0 && prevErrorRate < errorThresh && newErrorRate >= errorThresh {
+		// In quiet mode, skip logging demotion events
+		if !quietMode && errorThresh > 0 && prevErrorRate < errorThresh && newErrorRate >= errorThresh {
 			logger.WithFields(logrus.Fields{
 				"resolver":   resolver,
 				"error_rate": fmt.Sprintf("%.2f%%", newErrorRate*100),
@@ -1222,6 +1250,7 @@ func (p *Pool) RecordResolverQuery(resolver string, success bool) {
 		}
 
 		// Check if resolver should be disabled (suspension)
+		// Always log suspensions regardless of quiet mode
 		if disableThresh > 0 && !wasDisabled && newErrorRate >= disableThresh {
 			metrics.disabledAt.Store(time.Now().Unix())
 			logger.WithFields(logrus.Fields{

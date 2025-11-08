@@ -61,6 +61,21 @@ Add pre/post-refresh callbacks for logging, metrics, or conditional refresh.
 ### Auto-Refresh
 Automatically refresh resolver health at regular intervals.
 
+### Quiet Mode for Production
+Reduce log verbosity by suppressing demotion messages while still tracking critical state changes (suspensions and reinstatements).
+
+```go
+nsp := nspool.NewFromPoolSlice([]string{"1.1.1.1:53", "8.8.8.8:53"})
+nsp.SetLogger(logger)
+
+// Enable quiet mode - only logs when resolvers are suspended or reinstated
+nsp.SetQuietResolverStateChange(true)
+
+// Set error thresholds
+nsp.SetResolverErrorThreshold(0.05)    // 5% error rate triggers weight reduction (logged only if quiet mode is off)
+nsp.SetResolverDisableThreshold(0.20)  // 20% error rate triggers suspension (always logged)
+```
+
 ## Documentation
 
 Full documentation with examples is available at [pkg.go.dev/github.com/nerdlem/nspool/v2](https://pkg.go.dev/github.com/nerdlem/nspool/v2).

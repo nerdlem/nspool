@@ -2249,3 +2249,32 @@ func TestDefaultRefreshHooks(t *testing.T) {
 		DefaultRefreshPostHook(nil)
 	})
 }
+
+func TestQuietResolverStateChange(t *testing.T) {
+t.Run("default is false", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"8.8.8.8", "1.1.1.1"})
+if p.QuietResolverStateChange() != false {
+t.Error("Expected QuietResolverStateChange to default to false")
+}
+})
+
+t.Run("setter and getter work", func(t *testing.T) {
+p := NewFromPoolSlice([]string{"8.8.8.8", "1.1.1.1"})
+p.SetQuietResolverStateChange(true)
+if !p.QuietResolverStateChange() {
+t.Error("Expected QuietResolverStateChange to be true after setting")
+}
+p.SetQuietResolverStateChange(false)
+if p.QuietResolverStateChange() {
+t.Error("Expected QuietResolverStateChange to be false after setting")
+}
+})
+
+t.Run("nil pool operations are safe", func(t *testing.T) {
+var p *Pool
+if p.QuietResolverStateChange() != false {
+t.Error("Expected nil pool QuietResolverStateChange to return false")
+}
+p.SetQuietResolverStateChange(true) // Should not panic
+})
+}

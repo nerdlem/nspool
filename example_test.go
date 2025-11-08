@@ -328,3 +328,38 @@ func ExampleDefaultRefreshPostHook() {
 
 	fmt.Println("Using default post-hook")
 }
+
+// ExamplePool_SetQuietResolverStateChange demonstrates how to enable quiet mode
+// to suppress verbose demotion messages while still logging critical state changes.
+func ExamplePool_SetQuietResolverStateChange() {
+// Create a pool with some resolvers
+nsp := nspool.NewFromPoolSlice([]string{"1.1.1.1:53", "8.8.8.8:53"})
+
+// Set up logging
+logger := logrus.New()
+logger.SetLevel(logrus.InfoLevel)
+nsp.SetLogger(logger)
+
+// Configure error thresholds
+nsp.SetResolverErrorThreshold(0.05)    // 5% error rate triggers weight reduction
+nsp.SetResolverDisableThreshold(0.20)  // 20% error rate triggers suspension
+
+// Enable quiet mode to suppress demotion messages
+// Only suspension and reinstatement events will be logged
+nsp.SetQuietResolverStateChange(true)
+
+// Configure health checking
+nsp.SetHealthDomainSuffix("example.com")
+
+// Perform health check
+if err := nsp.Refresh(); err != nil {
+log.Fatal(err)
+}
+
+// During normal operations, resolver weight reductions (demotions) will not be logged,
+// but suspensions (removals from pool) and reinstatements (additions back) will still
+// be logged for visibility into critical pool state changes.
+
+fmt.Println("Quiet mode enabled - only critical state changes will be logged")
+// Output: Quiet mode enabled - only critical state changes will be logged
+}
