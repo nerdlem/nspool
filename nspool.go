@@ -712,6 +712,18 @@ func (p *Pool) updateRefreshProgress(healthy bool) {
 	}
 }
 
+// RefreshProgress returns a snapshot of the current health-check refresh
+// progress: (processed, healthy, unhealthy, total). All values are zero when
+// no refresh is in progress. Safe for concurrent use.
+func (p *Pool) RefreshProgress() (processed, healthy, unhealthy, total int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.refreshProcessed, p.refreshHealthy, p.refreshUnhealthy, p.refreshTotal
+}
+
 func (p *Pool) updateResolverLists(healthyMap map[string]bool) {
 	avail := make([]string, 0, len(p.resolvers))
 	unavail := make([]string, 0, len(p.resolvers))
