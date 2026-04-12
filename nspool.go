@@ -647,10 +647,19 @@ func (p *Pool) checkResolverHealth(res string, retries int) bool {
 		m := new(dns.Msg)
 		m.SetQuestion(name, p.hcQType)
 		m.RecursionDesired = true
+		m.SetEdns0(4096, false)
 
 		ctx, cancel := context.WithTimeout(context.Background(), p.hcResolverTimeout)
 		start := time.Now()
 		ans, _, err := p.Client.ExchangeContext(ctx, m, addPort(res))
+
+		// If the UDP response was truncated, retry over TCP.
+		if err == nil && ans != nil && ans.Truncated {
+			tcpClient := &dns.Client{Net: "tcp"}
+			if ans2, _, err2 := tcpClient.ExchangeContext(ctx, m.Copy(), addPort(res)); err2 == nil && ans2 != nil {
+				ans = ans2
+			}
+		}
 		cancel()
 		elapsed := time.Since(start)
 		lastErr = err
