@@ -1415,19 +1415,39 @@ func (p *Pool) checkAndReinstate(metrics *ResolverMetrics, resolver string, cool
 		return
 	}
 
+	// Use CompareAndSwap to ensure only one goroutine performs the reinstatement.
+	// Without this, 1000 concurrent workers can all see disabledAt > 0 and all
+	// log a reinstatement for the same resolver simultaneously.
+	if !metrics.disabledAt.CompareAndSwap(disabledAtTS, 0) {
+		return // another goroutine already reinstated this resolver
+	}
+
+	// Capture stats before reset for logging
+	total := metrics.total.Load()
+	failures := metrics.failures.Load()
+	errorRate := 0.0
+	if total > 0 {
+		errorRate = float64(failures) / float64(total)
+	}
+
+	// Clear suspension marker and reset cumulative error stats so the resolver
+	// gets a clean slate. Without this, a resolver whose historical error rate
+	// (e.g. 38%) already exceeds the disable threshold would be re-suspended
+	// on the very next query recorded against it, making reinstatement a no-op.
 	metrics.disabledAt.Store(0)
+	metrics.total.Store(0)
+	metrics.failures.Store(0)
+	metrics.lastError.Store(0)
 
 	p.mu.Lock()
 	logger := p.logger
 	p.mu.Unlock()
 
 	if logger != nil {
-		total := metrics.total.Load()
-		failures := metrics.failures.Load()
-		errorRate := float64(failures) / float64(total)
 		logger.WithFields(logrus.Fields{
 			"resolver":        resolver,
-			"error_rate":      fmt.Sprintf("%.2f%%", errorRate*100),
+			"prev_error_rate": fmt.Sprintf("%.2f%%", errorRate*100),
+			"prev_total":      total,
 			"cooldown_period": cooldownPeriod.String(),
 		}).Info("✅ resolver reinstated: cooldown period expired")
 	}
